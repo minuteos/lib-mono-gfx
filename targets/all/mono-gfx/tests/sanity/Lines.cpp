@@ -136,4 +136,105 @@ TEST_CASE("07 DrawLine reversed endpoints")
     Assert(BuffersEqual(a, b));
 }
 
+TEST_CASE("08 Long off-buffer diagonal does not draw or hang")
+{
+    // Without endpoint clipping, this would iterate ~1000 Bresenham steps
+    // and call DrawPixel on every one of them. With clipping the visible
+    // segment is the buffer's main diagonal.
+    uint8_t mem[3 * 20] = {};
+    MonoBuffer b(mem, 20, 20);
+    b.DrawLine(0, 0, 1000, 1000);
+    // every pixel on the main diagonal must be set
+    for (int i = 0; i < 20; i++) AssertEqual(b.GetPixel(i, i), true);
+    // off-diagonal pixels must remain clear
+    for (int y = 0; y < 20; y++)
+        for (int x = 0; x < 20; x++)
+            if (x != y) AssertEqual(b.GetPixel(x, y), false);
+}
+
+TEST_CASE("09 Line entirely outside is rejected")
+{
+    uint8_t mem[3 * 20] = {};
+    MonoBuffer b(mem, 20, 20);
+    // diagonal that enters x>=0 only at y=50, well past the buffer
+    b.DrawLine(-50, 0, 950, 1000);
+    for (size_t i = 0; i < sizeof(mem); i++)
+        AssertEqual((unsigned)mem[i], 0u);
+
+    // line entirely above
+    b.DrawLine(-100, -10, 100, -5);
+    // line entirely below
+    b.DrawLine(0, 25, 50, 30);
+    // line entirely left
+    b.DrawLine(-10, 0, -5, 19);
+    // line entirely right
+    b.DrawLine(25, 0, 50, 19);
+    for (size_t i = 0; i < sizeof(mem); i++)
+        AssertEqual((unsigned)mem[i], 0u);
+}
+
+TEST_CASE("10 Fully-inside lines are unaffected by clipping")
+{
+    constexpr int W = 32, H = 16, S = W / 8;
+    // for endpoints fully inside the buffer, the clipper must not change
+    // anything; the output must be byte-for-byte identical to the
+    // straightforward Bresenham this function falls back to
+    auto naiveBresenham = [](MonoBuffer dst, int x0, int y0, int x1, int y1) {
+        int dx = x1 - x0, dy = y1 - y0;
+        int sx = dx > 0 ? 1 : -1; if (dx < 0) dx = -dx;
+        int sy = dy > 0 ? 1 : -1; if (dy < 0) dy = -dy;
+        int err = dx - dy;
+        for (;;)
+        {
+            dst.DrawPixel(x0, y0);
+            if (x0 == x1 && y0 == y1) break;
+            int e2 = err << 1;
+            if (e2 > -dy) { err -= dy; x0 += sx; }
+            if (e2 < dx)  { err += dx; y0 += sy; }
+        }
+    };
+
+    for (int x0 = 0; x0 < W; x0 += 3)
+        for (int y0 = 0; y0 < H; y0 += 3)
+            for (int x1 = 0; x1 < W; x1 += 3)
+                for (int y1 = 0; y1 < H; y1 += 3)
+                {
+                    if (x0 == x1 && y0 == y1) continue;
+                    uint8_t mA[S * H] = {}, mB[S * H] = {};
+                    MonoBuffer a(mA, W, H), b(mB, W, H);
+                    a.DrawLine(x0, y0, x1, y1);
+                    naiveBresenham(b, x0, y0, x1, y1);
+                    Assert(BuffersEqual(a, b));
+                }
+}
+
+TEST_CASE("11 Clipped lines stay within the buffer")
+{
+    // probe with deliberately huge coordinates to exercise the 64-bit
+    // intermediate math; no pixels should ever be drawn outside the
+    // buffer (the per-pixel guard would mask such a regression, but we
+    // still want to know the clipper computes sensible endpoints)
+    constexpr int W = 20, H = 20, S = W / 8 + 1;
+    int probes[][4] = {
+        { -1000, -1000, 1000, 1000 },
+        { -1000000, 0, 1000000, 19 },
+        { 10, -500, 10, 500 },
+        { -500, 10, 500, 10 },
+        { 30, -10, -10, 30 },
+        { 19, 0, 0, 19 },
+        { 100000, -100000, -100000, 100000 },
+    };
+    for (auto& p : probes)
+    {
+        uint8_t mem[S * H] = {};
+        MonoBuffer b(mem, W, H);
+        b.DrawLine(p[0], p[1], p[2], p[3]);
+        // every set pixel must lie within the buffer
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++)
+                if (b.GetPixel(x, y))
+                    Assert(x >= 0 && x < W && y >= 0 && y < H);
+    }
+}
+
 }

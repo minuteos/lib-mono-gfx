@@ -112,9 +112,77 @@ void MonoBuffer::DrawVLine(int x, int y, int height, DrawOp op)
     }
 }
 
+//! Cohen-Sutherland outcode bits used by the line clipper
+enum : uint8_t
+{
+    OutLeft   = 1,
+    OutRight  = 2,
+    OutTop    = 4,
+    OutBottom = 8,
+};
+
+//! Computes the Cohen-Sutherland region code for a point against [0,w) x [0,h)
+ALWAYS_INLINE static uint8_t Outcode(int x, int y, int w, int h)
+{
+    uint8_t code = 0;
+    if (x < 0)      code |= OutLeft;
+    else if (x >= w) code |= OutRight;
+    if (y < 0)      code |= OutTop;
+    else if (y >= h) code |= OutBottom;
+    return code;
+}
+
+//! Cohen-Sutherland endpoint clipping against [0, w) x [0, h)
+/*!
+ * Returns @c true when the line has any visible portion (with the
+ * endpoints rewritten to the visible segment), @c false when it lies
+ * entirely outside the rectangle. Intermediate products use 64-bit math
+ * to avoid overflow on long lines through tall buffers.
+ */
+static bool ClipLine(int& x0, int& y0, int& x1, int& y1, int w, int h)
+{
+    if (w <= 0 || h <= 0) return false;
+    uint8_t oc0 = Outcode(x0, y0, w, h);
+    uint8_t oc1 = Outcode(x1, y1, w, h);
+    while (true)
+    {
+        if (!(oc0 | oc1)) return true;   // both endpoints inside
+        if (oc0 & oc1)    return false;  // share an outside half-plane
+
+        uint8_t oc = oc0 ? oc0 : oc1;
+        int64_t dx = int64_t(x1) - x0;
+        int64_t dy = int64_t(y1) - y0;
+        int x, y;
+        if (oc & OutBottom)
+        {
+            y = h - 1;
+            x = int(x0 + (dx * (int64_t(h - 1) - y0)) / dy);
+        }
+        else if (oc & OutTop)
+        {
+            y = 0;
+            x = int(x0 + (dx * int64_t(-y0)) / dy);
+        }
+        else if (oc & OutRight)
+        {
+            x = w - 1;
+            y = int(y0 + (dy * (int64_t(w - 1) - x0)) / dx);
+        }
+        else
+        {
+            x = 0;
+            y = int(y0 + (dy * int64_t(-x0)) / dx);
+        }
+
+        if (oc == oc0) { x0 = x; y0 = y; oc0 = Outcode(x, y, w, h); }
+        else            { x1 = x; y1 = y; oc1 = Outcode(x, y, w, h); }
+    }
+}
+
 void MonoBuffer::DrawLine(int x0, int y0, int x1, int y1, DrawOp op)
 {
-    // axis-aligned shortcuts
+    // axis-aligned shortcuts: HLine/VLine clip internally and run a
+    // single tight loop, so the slow Bresenham path is unnecessary
     if (y0 == y1)
     {
         if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
@@ -128,8 +196,12 @@ void MonoBuffer::DrawLine(int x0, int y0, int x1, int y1, DrawOp op)
         return;
     }
 
-    // Bresenham's algorithm with clipping done per-pixel; for short lines
-    // this is cheaper than running Cohen-Sutherland up front
+    // Endpoint pre-clip: avoids iterating Bresenham over potentially
+    // millions of off-buffer points. The per-pixel clip in DrawPixel
+    // remains as a safety net for the at-most-one-pixel rounding error
+    // introduced by integer division at the clip intersections.
+    if (!ClipLine(x0, y0, x1, y1, w, h)) return;
+
     int dx = x1 - x0, dy = y1 - y0;
     int sx = dx > 0 ? 1 : -1; if (dx < 0) dx = -dx;
     int sy = dy > 0 ? 1 : -1; if (dy < 0) dy = -dy;
