@@ -306,6 +306,174 @@ void MonoBuffer::FillRoundRect(int x, int y, int width, int height, int r, DrawO
     }
 }
 
+// Bhaskara I sine approximation in Q12 fixed point. Accurate to ~0.2% of
+// full scale, which is well below one pixel for any radius this library
+// targets, and needs no table or libm dependency.
+ALWAYS_INLINE static int Sin12(int deg)
+{
+    deg %= 360;
+    if (deg < 0) deg += 360;
+    int sign = 1;
+    if (deg > 180) { deg -= 180; sign = -1; }
+    int t = deg * (180 - deg);          // 0..8100
+    return sign * (4 * t * 4096 / (40500 - t));
+}
+
+ALWAYS_INLINE static int Cos12(int deg) { return Sin12(deg + 90); }
+
+void MonoBuffer::DrawArc(int cx, int cy, int r, int startDeg, int endDeg, DrawOp op)
+{
+    if (r < 0 || op == DrawOp::Keep) return;
+    if (r == 0) { DrawPixel(cx, cy, op); return; }
+
+    int span = endDeg - startDeg;
+    if (span == 0) return;
+    if (span < 0) span += ((-span / 360) + 1) * 360;    // normalise to (0,360]
+    if (span > 360) span = 360;
+
+    // step fine enough that successive samples are at most ~1px apart
+    int steps = (span * r) / 57 + 1;
+    int prevX = cx + ((r * Cos12(startDeg) + 2048) >> 12);
+    int prevY = cy + ((r * Sin12(startDeg) + 2048) >> 12);
+    DrawPixel(prevX, prevY, op);
+    for (int i = 1; i <= steps; i++)
+    {
+        int a = startDeg + span * i / steps;
+        int x = cx + ((r * Cos12(a) + 2048) >> 12);
+        int y = cy + ((r * Sin12(a) + 2048) >> 12);
+        // join consecutive samples so no gaps appear at large radii
+        if (x != prevX || y != prevY)
+        {
+            if ((x - prevX) * (x - prevX) + (y - prevY) * (y - prevY) > 2)
+                DrawLine(prevX, prevY, x, y, op);
+            else
+                DrawPixel(x, y, op);
+            prevX = x; prevY = y;
+        }
+    }
+}
+
+void MonoBuffer::DrawTriangle(int x0, int y0, int x1, int y1, int x2, int y2, DrawOp op)
+{
+    DrawLine(x0, y0, x1, y1, op);
+    DrawLine(x1, y1, x2, y2, op);
+    DrawLine(x2, y2, x0, y0, op);
+}
+
+void MonoBuffer::FillTriangle(int x0, int y0, int x1, int y1, int x2, int y2, DrawOp op)
+{
+    if (op == DrawOp::Keep) return;
+
+    // sort vertices by ascending y so we can split into a flat-bottom and a
+    // flat-top half and walk both edges with integer interpolation
+    if (y0 > y1) { int t; t = y0; y0 = y1; y1 = t; t = x0; x0 = x1; x1 = t; }
+    if (y0 > y2) { int t; t = y0; y0 = y2; y2 = t; t = x0; x0 = x2; x2 = t; }
+    if (y1 > y2) { int t; t = y1; y1 = y2; y2 = t; t = x1; x1 = x2; x2 = t; }
+
+    if (y2 == y0)
+    {
+        // fully degenerate - a single horizontal extent
+        int lo = x0 < x1 ? x0 : x1; if (x2 < lo) lo = x2;
+        int hi = x0 > x1 ? x0 : x1; if (x2 > hi) hi = x2;
+        DrawHLine(lo, y0, hi - lo + 1, op);
+        return;
+    }
+
+    // long edge (v0->v2) x as a function of y, in Q16
+    int longDx = ((x2 - x0) << 16) / (y2 - y0);
+    int longX = x0 << 16;
+
+    // spans are rounded outward (left edge floored, right edge ceiled) so a
+    // filled triangle is a conservative superset of its own outline - a
+    // border drawn over a fill of the same triangle leaves no 1px seam
+    auto Span = [&](int y, int xa, int xb)
+    {
+        int lo = xa < xb ? xa : xb;
+        int hi = xa < xb ? xb : xa;
+        lo >>= 16;
+        hi = (hi + 0xFFFF) >> 16;
+        DrawHLine(lo, y, hi - lo + 1, op);
+    };
+
+    // upper sub-triangle v0->v1 (skipped when flat-top)
+    if (y1 > y0)
+    {
+        int dx = ((x1 - x0) << 16) / (y1 - y0);
+        int sx = x0 << 16;
+        for (int y = y0; y < y1; y++)
+        {
+            Span(y, longX, sx);
+            longX += longDx;
+            sx += dx;
+        }
+    }
+
+    // lower sub-triangle v1->v2
+    if (y2 > y1)
+    {
+        int dx = ((x2 - x1) << 16) / (y2 - y1);
+        int sx = x1 << 16;
+        for (int y = y1; y <= y2; y++)
+        {
+            Span(y, longX, sx);
+            longX += longDx;
+            sx += dx;
+        }
+    }
+    else
+    {
+        // flat bottom (y1 == y2): the upper loop stopped at y1-1, so the
+        // bottom edge between the long edge and v1 still needs its row
+        Span(y1, longX, x1 << 16);
+    }
+}
+
+void MonoBuffer::BlitRotated(int destX, int destY, const MonoBuffer& src,
+    int pivotX, int pivotY, int angleDeg, DrawOp op)
+{
+    if (op == DrawOp::Keep || src.IsEmpty()) return;
+
+    int cosA = Cos12(angleDeg);
+    int sinA = Sin12(angleDeg);
+
+    // destination bounding box: rotate the four source corners around the
+    // pivot, then translate so the pivot lands on (destX, destY)
+    int minX = 0x7FFF, minY = 0x7FFF, maxX = -0x7FFF, maxY = -0x7FFF;
+    const int cornX[4] = { 0, src.w, 0, src.w };
+    const int cornY[4] = { 0, 0, src.h, src.h };
+    for (int i = 0; i < 4; i++)
+    {
+        int rx = cornX[i] - pivotX, ry = cornY[i] - pivotY;
+        int dx = destX + ((rx * cosA - ry * sinA + 2048) >> 12);
+        int dy = destY + ((rx * sinA + ry * cosA + 2048) >> 12);
+        if (dx < minX) minX = dx;
+        if (dx > maxX) maxX = dx;
+        if (dy < minY) minY = dy;
+        if (dy > maxY) maxY = dy;
+    }
+
+    if (minX < 0) minX = 0;
+    if (minY < 0) minY = 0;
+    if (maxX >= w) maxX = w - 1;
+    if (maxY >= h) maxY = h - 1;
+
+    // inverse map every destination pixel back into source space (nearest)
+    for (int dy = minY; dy <= maxY; dy++)
+    {
+        for (int dx = minX; dx <= maxX; dx++)
+        {
+            int rx = dx - destX, ry = dy - destY;
+            int sx = pivotX + ((rx * cosA + ry * sinA + 2048) >> 12);
+            int sy = pivotY + ((-rx * sinA + ry * cosA + 2048) >> 12);
+            if (unsigned(sx) < unsigned(src.w) && unsigned(sy) < unsigned(src.h) &&
+                (src.p[sy * src.s + (sx >> 3)] & (0x80 >> (sx & 7))))
+            {
+                ApplyDrawOp(p[dy * s + (dx >> 3)], 0x80 >> (dx & 7), op);
+            }
+        }
+    }
+}
+
 //! Combines a destination byte with a source byte under an arbitrary blit op
 ALWAYS_INLINE static uint8_t ApplyBlit(uint8_t dst, uint8_t src, BlitOp op)
 {
