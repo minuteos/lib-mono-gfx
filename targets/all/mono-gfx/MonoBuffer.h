@@ -160,11 +160,24 @@ public:
     //! Copies a source rectangle onto this one at (@p x, @p y) using the specified blit op
     void Blit(int x, int y, const MonoBuffer& src, int sx, int sy, int width, int height, BlitOp op = BlitOp::Copy);
 
-    //! Renders a UTF-8 / ASCII string at (@p x, @p y)
+    //! Renders a single glyph by code point at (@p x, @p y)
     /*!
-     * The pen advances pixel-by-pixel, taking each glyph's stored width
-     * and the font's spacing into account. Returns the X coordinate at
-     * which the next glyph would be drawn, useful for chaining strings.
+     * Unlike @ref DrawText (which walks a byte string and so only reaches
+     * code points 0-255) this takes a full code point, so symbol/icon
+     * fonts beyond U+00FF are drawable directly. Returns the X coordinate
+     * at which the next glyph would be drawn (@p x + width + spacing),
+     * useful for chaining.
+     */
+    int DrawGlyph(int x, int y, const Font& font, unsigned codepoint, DrawOp op = DrawOp::Set);
+
+    //! Renders a UTF-8 string at (@p x, @p y)
+    /*!
+     * The string is UTF-8 decoded to code points (malformed bytes pass
+     * through as-is), so symbol/icon fonts beyond U+00FF render from a
+     * normal C string. The pen advances by each glyph's stored width
+     * plus the font spacing; returns the X coordinate at which the next
+     * glyph would be drawn, useful for chaining. @ref MeasureText
+     * decodes identically.
      */
     int DrawText(int x, int y, const Font& font, Span text, DrawOp op = DrawOp::Set);
     //! Convenience wrapper for null-terminated strings

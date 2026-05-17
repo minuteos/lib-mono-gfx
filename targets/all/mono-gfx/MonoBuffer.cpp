@@ -621,46 +621,85 @@ void MonoBuffer::Blit(int x, int y, const MonoBuffer& src, int sx, int sy, int w
     }
 }
 
+//! Decodes the next UTF-8 code point from [@p p, @p end), advancing @p p
+/*!
+ * Lenient: a byte that is not a valid (non-overlong, non-surrogate,
+ * in-range) UTF-8 sequence start/continuation is returned as-is and the
+ * pointer advances one byte, so ASCII is untouched and malformed input
+ * never stalls or runs past @p end.
+ */
+static unsigned NextCodepoint(const char*& p, const char* end)
+{
+    unsigned b0 = (unsigned char)p[0];
+    if (b0 < 0x80) { p += 1; return b0; }
+
+    int n;
+    unsigned cp, minv;
+    if ((b0 & 0xE0) == 0xC0)      { n = 1; cp = b0 & 0x1F; minv = 0x80; }
+    else if ((b0 & 0xF0) == 0xE0) { n = 2; cp = b0 & 0x0F; minv = 0x800; }
+    else if ((b0 & 0xF8) == 0xF0) { n = 3; cp = b0 & 0x07; minv = 0x10000; }
+    else { p += 1; return b0; }                 // invalid lead byte
+
+    if (p + 1 + n > end) { p += 1; return b0; }  // truncated
+    for (int i = 1; i <= n; i++)
+    {
+        unsigned c = (unsigned char)p[i];
+        if ((c & 0xC0) != 0x80) { p += 1; return b0; }   // bad continuation
+        cp = (cp << 6) | (c & 0x3F);
+    }
+    if (cp < minv || (cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF)
+    {
+        p += 1; return b0;                       // overlong / surrogate / oor
+    }
+    p += 1 + n;
+    return cp;
+}
+
+int MonoBuffer::DrawGlyph(int x, int y, const Font& font, unsigned cp, DrawOp op)
+{
+    Glyph g = font.GetGlyph(cp);
+    if (op != DrawOp::Keep)
+    {
+        if (font.IsRLE())
+        {
+            // RLE glyphs decode straight into horizontal runs - no temp
+            // buffer, the op maps directly since spans are foreground only
+            font.ForEachSpan(cp, [this, x, y, op](int rx, int ry, int len)
+            {
+                DrawHLine(x + rx, y + ry, len, op);
+            });
+        }
+        else if (g.bitmap)
+        {
+            BlitOp blit = (op == DrawOp::Clear)  ? BlitOp::AndNot :
+                          (op == DrawOp::Invert) ? BlitOp::Xor :
+                                                   BlitOp::Or;
+            MonoBuffer src((void*)g.bitmap, g.width, font.height,
+                           (g.width + 7) >> 3);
+            Blit(x, y, src, 0, 0, g.width, font.height, blit);
+        }
+    }
+    return x + g.width + font.spacing;
+}
+
 int MonoBuffer::DrawText(int x, int y, const Font& font, Span text, DrawOp op)
 {
     if (op == DrawOp::Keep) return x + MeasureText(font, text);
 
     int pen = x;
-    int spacing = font.spacing;
-    int height = font.height;
-    bool rle = font.IsRLE();
-    BlitOp blit = (op == DrawOp::Clear)  ? BlitOp::AndNot :
-                  (op == DrawOp::Invert) ? BlitOp::Xor :
-                                           BlitOp::Or;
-
+    int lineH = font.height + font.spacing;
     auto* sp = text.Pointer();
     auto* end = text.end();
     while (sp < end)
     {
-        unsigned c = (unsigned char)*sp++;
+        unsigned c = NextCodepoint(sp, end);
         if (c == '\n')
         {
-            y += height + spacing;
+            y += lineH;
             pen = x;
             continue;
         }
-        Glyph g = font.GetGlyph(c);
-        if (rle)
-        {
-            // RLE glyphs decode straight into horizontal runs - no temp
-            // buffer, the op maps directly since spans are foreground only
-            int gx = pen, gy = y;
-            font.ForEachSpan(c, [this, gx, gy, op](int rx, int ry, int len)
-            {
-                DrawHLine(gx + rx, gy + ry, len, op);
-            });
-        }
-        else if (g.bitmap)
-        {
-            MonoBuffer src((void*)g.bitmap, g.width, height, (g.width + 7) >> 3);
-            Blit(pen, y, src, 0, 0, g.width, height, blit);
-        }
-        pen += g.width + spacing;
+        pen = DrawGlyph(pen, y, font, c, op);
     }
     return pen;
 }
@@ -673,7 +712,7 @@ int MonoBuffer::MeasureText(const Font& font, Span text)
     auto* end = text.end();
     while (p < end)
     {
-        char c = *p++;
+        unsigned c = NextCodepoint(p, end);
         if (c == '\n')
         {
             if (pen > longest) longest = pen;
