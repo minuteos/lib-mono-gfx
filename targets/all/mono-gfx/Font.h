@@ -36,6 +36,21 @@ enum struct FontFormat : uint8_t
     RLE = 1,
 };
 
+//! One contiguous block of the code-point map (LVGL-style cmap subrange)
+/*!
+ * A @ref Font may cover several disjoint code-point ranges (e.g. ASCII
+ * plus scattered icon code points) without a giant sparse table: each
+ * range maps @c [first, first+count) onto consecutive glyph indices
+ * starting at @ref glyphBase. Real Unicode code points are used directly
+ * - no application-side remapping.
+ */
+struct FontRange
+{
+    uint16_t first;         //!< first code point in this range
+    uint16_t count;         //!< number of contiguous code points
+    uint16_t glyphBase;     //!< glyph index of @ref first
+};
+
 //! A bitmap font usable with @ref MonoBuffer::DrawText
 /*!
  * A font is a packed bitmap, optional offset and width tables and a few
@@ -50,9 +65,11 @@ enum struct FontFormat : uint8_t
  *   Glyph @c n is @c widths[n] pixels wide and starts at byte
  *   @c offsets[n] in @ref data.
  *
- * In either case, only the contiguous range
- * <tt>[firstChar, firstChar + charCount)</tt> of code points is covered;
- * code points outside that range are rendered with width
+ * Code-point coverage is either a single contiguous range
+ * <tt>[firstChar, firstChar + charCount)</tt> (when @ref ranges is null)
+ * or, for fonts mixing e.g. ASCII with scattered icons, the set of
+ * @ref ranges (LVGL-style multi-range cmap, real Unicode code points).
+ * Code points outside the covered set are rendered with width
  * @ref missingWidth and no bitmap.
  *
  * When @ref format is @ref FontFormat::RLE the glyph data is a
@@ -86,10 +103,14 @@ struct Font
     uint8_t fixedWidth;
     //! Width substituted for code points outside the encoded range
     uint8_t missingWidth;
-    //! First encoded code point
+    //! First encoded code point (single-range form; ignored if @ref ranges)
     uint16_t firstChar;
-    //! Number of contiguous encoded code points
+    //! Number of contiguous encoded code points (single-range form)
     uint16_t charCount;
+    //! Optional multi-range cmap; @c nullptr selects the single-range form
+    const FontRange* ranges;
+    //! Number of entries in @ref ranges
+    uint16_t rangeCount;
     //! Per-glyph width in pixels, or @c nullptr for fixed-width fonts
     const uint8_t* widths;
     //! Per-glyph byte offset into @ref data, or @c nullptr for fixed-width fonts
@@ -102,20 +123,37 @@ struct Font
     //! @c true if glyph data is run-length encoded
     ALWAYS_INLINE bool IsRLE() const { return format == FontFormat::RLE; }
 
+    //! Resolves a code point to a glyph index, or -1 if not covered
+    int GlyphIndex(unsigned codepoint) const
+    {
+        if (ranges)
+        {
+            for (unsigned i = 0; i < rangeCount; i++)
+            {
+                unsigned d = codepoint - ranges[i].first;
+                if (d < ranges[i].count)
+                    return int(ranges[i].glyphBase + d);
+            }
+            return -1;
+        }
+        unsigned d = codepoint - firstChar;
+        return d < charCount ? int(d) : -1;
+    }
+
     //! Returns the @ref Glyph descriptor for the requested code point
     Glyph GetGlyph(unsigned codepoint) const
     {
-        unsigned index = codepoint - firstChar;
-        if (index >= charCount)
+        int idx = GlyphIndex(codepoint);
+        if (idx < 0)
         {
             return Glyph { nullptr, missingWidth };
         }
         if (widths)
         {
-            return Glyph { data + offsets[index], widths[index] };
+            return Glyph { data + offsets[idx], widths[idx] };
         }
         unsigned stride = (fixedWidth + 7u) >> 3;
-        return Glyph { data + index * stride * height, fixedWidth };
+        return Glyph { data + unsigned(idx) * stride * height, fixedWidth };
     }
 
     //! Walks the foreground horizontal runs of an RLE glyph
@@ -130,12 +168,12 @@ struct Font
     template <typename Fn>
     void ForEachSpan(unsigned codepoint, Fn&& span) const
     {
-        unsigned index = codepoint - firstChar;
-        if (format != FontFormat::RLE || index >= charCount ||
-            !widths || !offsets)
+        int idx = GlyphIndex(codepoint);
+        if (format != FontFormat::RLE || idx < 0 || !widths || !offsets)
         {
             return;
         }
+        unsigned index = unsigned(idx);
         const uint8_t* p = data + offsets[index];
         bool hi = true;                 // high nibble of *p is read first
         auto nib = [&]() -> unsigned
