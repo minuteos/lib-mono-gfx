@@ -229,4 +229,5 @@ const Font Font5x7 = {
     .widths = nullptr,
     .offsets = nullptr,
     .data = data,
+    .format = FontFormat::Raw,
 };
