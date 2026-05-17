@@ -26,6 +26,16 @@ struct Glyph
     uint8_t width;
 };
 
+//! Glyph bitmap storage scheme used by a @ref Font
+enum struct FontFormat : uint8_t
+{
+    //! Uncompressed: @ref Font::data holds raw row-major MSB-first bitmaps
+    Raw = 0,
+    //! Nibble run-length: @ref Font::data is a continuous run stream
+    //! decoded straight into horizontal spans at blit time, no buffer
+    RLE = 1,
+};
+
 //! A bitmap font usable with @ref MonoBuffer::DrawText
 /*!
  * A font is a packed bitmap, optional offset and width tables and a few
@@ -33,7 +43,8 @@ struct Glyph
  *
  * - @b Fixed-width: @ref widths and @ref offsets are both null. Every
  *   glyph is @ref fixedWidth pixels wide. Glyph @c n starts at byte
- *   @c n*((fixedWidth+7)/8)*height in @ref data.
+ *   @c n*((fixedWidth+7)/8)*height in @ref data. Only valid for
+ *   @ref FontFormat::Raw.
  *
  * - @b Variable-width: @ref widths and @ref offsets are non-null.
  *   Glyph @c n is @c widths[n] pixels wide and starts at byte
@@ -43,6 +54,27 @@ struct Glyph
  * <tt>[firstChar, firstChar + charCount)</tt> of code points is covered;
  * code points outside that range are rendered with width
  * @ref missingWidth and no bitmap.
+ *
+ * When @ref format is @ref FontFormat::RLE the glyph data is a
+ * @b continuous run-length stream (not per row) instead of a raw bitmap.
+ * The glyph is treated as @c width*height pixels in row-major order; runs
+ * of equal colour alternate starting with @b background (a glyph that
+ * begins on a set pixel starts with a zero-length background run). Each
+ * run length is read from a nibble stream, high nibble of each byte
+ * first, glyphs byte-aligned at @ref offsets:
+ *
+ * - @c 0x0..0xE         -> run length @c 0..14 (one nibble)
+ * - @c 0xF, @c 0x0..0xD -> run length @c 15..28
+ * - @c 0xF, @c 0xE, hi, lo            -> @c 29 + (8-bit big-endian nibbles)
+ * - @c 0xF, @c 0xF, n2, n1, n0        -> @c 285 + (12-bit big-endian nibbles)
+ *
+ * The maximum encodable run is 4380; the (vanishingly rare) longer run is
+ * split by the generator into chunks joined by a zero-length opposite-
+ * colour run, so the decoder needs no special case. Decoding is O(runs),
+ * allocation-free, every byte read once, and emits one
+ * @ref MonoBuffer::DrawHLine per foreground run segment - a run crossing a
+ * row boundary is simply split at the edge. RLE always uses the
+ * variable-width table form.
  */
 struct Font
 {
@@ -62,8 +94,13 @@ struct Font
     const uint8_t* widths;
     //! Per-glyph byte offset into @ref data, or @c nullptr for fixed-width fonts
     const uint16_t* offsets;
-    //! Glyph bitmap data
+    //! Glyph bitmap data (raw bitmap or RLE stream per @ref format)
     const uint8_t* data;
+    //! Glyph storage scheme; defaults to @ref FontFormat::Raw
+    FontFormat format;
+
+    //! @c true if glyph data is run-length encoded
+    ALWAYS_INLINE bool IsRLE() const { return format == FontFormat::RLE; }
 
     //! Returns the @ref Glyph descriptor for the requested code point
     Glyph GetGlyph(unsigned codepoint) const
@@ -79,5 +116,63 @@ struct Font
         }
         unsigned stride = (fixedWidth + 7u) >> 3;
         return Glyph { data + index * stride * height, fixedWidth };
+    }
+
+    //! Walks the foreground horizontal runs of an RLE glyph
+    /*!
+     * Invokes @p span(int dx, int dy, int len) once per maximal run of
+     * set pixels on a row, with coordinates relative to the glyph origin
+     * (a foreground run that crosses a row boundary is reported as one
+     * span per row it touches). Does nothing for code points outside the
+     * encoded range or for non-RLE fonts. The decoder is O(runs),
+     * allocates nothing and reads every nibble exactly once.
+     */
+    template <typename Fn>
+    void ForEachSpan(unsigned codepoint, Fn&& span) const
+    {
+        unsigned index = codepoint - firstChar;
+        if (format != FontFormat::RLE || index >= charCount ||
+            !widths || !offsets)
+        {
+            return;
+        }
+        const uint8_t* p = data + offsets[index];
+        bool hi = true;                 // high nibble of *p is read first
+        auto nib = [&]() -> unsigned
+        {
+            if (hi) { hi = false; return *p >> 4; }
+            hi = true; return *p++ & 0xF;
+        };
+        auto run = [&]() -> int
+        {
+            unsigned n = nib();
+            if (n != 0xF) return int(n);                 // 0..14
+            unsigned m = nib();
+            if (m <= 0xD) return int(15 + m);            // 15..28
+            if (m == 0xE)                                // 29..284
+            {
+                unsigned h2 = nib();
+                return int(29 + ((h2 << 4) | nib()));
+            }
+            unsigned a = nib(), b = nib();               // 285..4380
+            return int(285 + ((a << 8) | (b << 4) | nib()));
+        };
+
+        int total = int(widths[index]) * height;
+        int px = 0, py = 0, pos = 0;
+        bool fg = false;                // glyph starts on background
+        while (pos < total)
+        {
+            int rem = run();
+            while (rem > 0)
+            {
+                int space = widths[index] - px;
+                int take = rem < space ? rem : space;
+                if (fg) span(px, py, take);
+                px += take; pos += take; rem -= take;
+                if (px == widths[index]) { px = 0; py++; }
+            }
+            fg = !fg;
+        }
     }
 };

@@ -628,6 +628,7 @@ int MonoBuffer::DrawText(int x, int y, const Font& font, Span text, DrawOp op)
     int pen = x;
     int spacing = font.spacing;
     int height = font.height;
+    bool rle = font.IsRLE();
     BlitOp blit = (op == DrawOp::Clear)  ? BlitOp::AndNot :
                   (op == DrawOp::Invert) ? BlitOp::Xor :
                                            BlitOp::Or;
@@ -636,7 +637,7 @@ int MonoBuffer::DrawText(int x, int y, const Font& font, Span text, DrawOp op)
     auto* end = text.end();
     while (sp < end)
     {
-        char c = *sp++;
+        unsigned c = (unsigned char)*sp++;
         if (c == '\n')
         {
             y += height + spacing;
@@ -644,7 +645,17 @@ int MonoBuffer::DrawText(int x, int y, const Font& font, Span text, DrawOp op)
             continue;
         }
         Glyph g = font.GetGlyph(c);
-        if (g.bitmap)
+        if (rle)
+        {
+            // RLE glyphs decode straight into horizontal runs - no temp
+            // buffer, the op maps directly since spans are foreground only
+            int gx = pen, gy = y;
+            font.ForEachSpan(c, [this, gx, gy, op](int rx, int ry, int len)
+            {
+                DrawHLine(gx + rx, gy + ry, len, op);
+            });
+        }
+        else if (g.bitmap)
         {
             MonoBuffer src((void*)g.bitmap, g.width, height, (g.width + 7) >> 3);
             Blit(pen, y, src, 0, 0, g.width, height, blit);
