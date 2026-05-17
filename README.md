@@ -23,11 +23,10 @@ targets/all/mono-gfx/
     MonoFormat.{h,cpp}  conversions to display-specific output formats
     Font.h              bitmap font definition (Raw + RLE formats)
     fonts/Font5x7.{h,cpp}   built-in 5x7 ASCII font (0x20-0x7E)
-    fonts/FontTiny.{h,cpp}  generated RLE sample (see tools/)
     mono-gfx.h          umbrella header
 tools/
-    mono-font-gen.py    BDF -> flat Font generator (--rle to compress)
-    samples/tiny.bdf    source for the generated FontTiny sample
+    mono-font-gen.py        TTF/OTF -> flat Font generator (--rle to compress)
+    test_mono_font_gen.py   deterministic encoder round-trip self-test
 ```
 
 To use the library, add `mono-gfx` to your project's `COMPONENTS` and
@@ -133,20 +132,39 @@ on a tiny font where raw is already one byte per row).
 
 ### Generator (`tools/mono-font-gen.py`)
 
-`tools/mono-font-gen.py` converts a BDF bitmap font into a flat `Font`
-C++ table (`--rle` to compress). Regenerate, never hand-edit, the output.
+`tools/mono-font-gen.py` rasterises TrueType / OpenType fonts into a flat
+`Font` C++ table (`--rle` to compress). It renders with FreeType (via
+`freetype-py`) using the **exact recipe of `lv_font_conv`** — the same
+`FT_Set_Pixel_Sizes(0,size)`, the same load flags
+(`FT_LOAD_RENDER | TARGET_NORMAL|FORCE_AUTOHINT | TARGET_MONO` for
+`--autohint-strong`; `TARGET_LIGHT` / `NO_AUTOHINT` for the other modes),
+the linear (unhinted) advance, and ascent/descent taken from the bbox
+extremes of the rendered set. Output is metrically identical to
+`lv_font_conv`; glyph extents can still differ by ~1–2px because
+`lv_font_conv` bundles its own frozen FreeType build and the autohinter
+changes between FreeType versions — this is invisible in use and not a
+regression. FreeType is a **generator-only** dependency: not needed by
+the library nor its test build, and the generated tables are checked in.
+
+Several source faces merge into one output (a text face plus icon
+faces). Each `--font` starts a source; `--range`, `--symbols`,
+`--coords` (variable-font axes) and `--autohint-strong` /
+`--autohint-off` apply to the source they follow; `--size`/`--name` are
+global:
 
 ```sh
-tools/mono-font-gen.py tools/samples/tiny.bdf --name FontTiny --rle \
-    --out targets/all/mono-gfx/fonts
+pip install freetype-py
+tools/mono-font-gen.py --name FontUI --size 24 --rle \
+    --out OUTDIR \
+    --font Text-VF.ttf --coords wdth=75,wght=700 --range 0x20-0x7E,0xB0 \
+    --autohint-strong \
+    --font Icons.otf --range 0xF240-0xF244,0xF072
 ```
 
-`fonts/FontTiny.{h,cpp}` is exactly this command's committed output; the
-sanity suite decodes it on-target and checks it against the source
-bitmap, so the generator and decoder are validated together with no
-build-time tooling. `lv_font_conv` does not emit BDF directly; a project
-using it can post-process its output, or feed any other BDF source - that
-wiring lives in the consuming project, not here.
+The encoder is independently pinned by `tools/test_mono_font_gen.py`, a
+deterministic round-trip + golden self-test (no fonts, no FreeType); the
+on-target decoder is pinned by the `FontRLE` C++ sanity suite against
+hand-written bytes — the two meet in the middle on the wire format.
 
 ## Primitives
 

@@ -6,17 +6,23 @@
 #
 # tools/mono-font-gen.py
 #
-# Converts a bitmap font into the flat mono-gfx `Font` layout (widths /
-# offsets / glyph data), optionally RLE-compressed.
+# Rasterises TrueType / OpenType fonts into the flat mono-gfx `Font`
+# layout (widths / offsets / glyph data), optionally RLE-compressed.
 #
-# Input is a BDF font - the classic, dependency-free bitmap font text
-# format. (lv_font_conv does not emit BDF directly; a project using it
-# can post-process its output, or use any other BDF source.) The tool,
-# the on-target decoder and the generated tables are exercised
-# hermetically by the sanity suite.
+# Rasterisation is done with FreeType (the `freetype-py` package) in pure
+# monochrome mode with the autohinter, which is what produces crisp 1-bpp
+# glyphs for an embedded panel. FreeType is a generator-only dependency:
+# it is not needed by the on-target library nor by its test build.
+#
+# Several source fonts can be merged into one output (a text face plus
+# icon faces, like a typical UI font set). Each `--font` starts a source;
+# `--range`, `--symbols`, `--coords` and `--autohint` apply to the source
+# they follow. `--size` and `--name` are global.
 #
 # Usage:
-#   mono-font-gen.py FONT.bdf --name FontX [--rle] --out DIR
+#   mono-font-gen.py --name FontX --size 24 [--rle] --out DIR \
+#       --font Text-VF.ttf --coords wdth=75,wght=700 --range 0x20-0x7E,0xB0 \
+#       --font Icons.otf --range 0xF240-0xF244
 #
 # Emits DIR/FontX.cpp and DIR/FontX.h. Regenerate, never hand-edit.
 
@@ -24,78 +30,100 @@ import argparse
 import os
 import sys
 
+import freetype
 
-def parse_bdf(path):
-    """Returns (ascent, descent, {codepoint: (advance, bbx, rows)}).
 
-    `bbx` is (w, h, xoff, yoff); `rows` is a list of h ints, each the
-    glyph row left-aligned with the MSB as the leftmost pixel.
-    """
-    ascent = descent = None
-    fbb = (0, 0, 0, 0)
-    glyphs = {}
+def parse_codepoints(range_spec=None, symbols=None):
+    cps = set()
+    if range_spec:
+        for part in range_spec.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "-" in part:
+                a, b = part.split("-", 1)
+                for cp in range(int(a, 0), int(b, 0) + 1):
+                    cps.add(cp)
+            else:
+                cps.add(int(part, 0))
+    if symbols:
+        for ch in symbols:
+            cps.add(ord(ch))
+    return cps
 
-    with open(path, "r", encoding="latin-1") as f:
-        lines = iter(f.read().splitlines())
 
-    for line in lines:
-        parts = line.split()
-        if not parts:
-            continue
-        key = parts[0]
-        if key == "FONTBOUNDINGBOX":
-            fbb = tuple(int(v) for v in parts[1:5])
-        elif key == "FONT_ASCENT":
-            ascent = int(parts[1])
-        elif key == "FONT_DESCENT":
-            descent = int(parts[1])
-        elif key == "STARTCHAR":
-            cp = None
-            advance = None
-            bbx = None
-            rows = []
-            for cl in lines:
-                cp_parts = cl.split()
-                if not cp_parts:
-                    continue
-                ck = cp_parts[0]
-                if ck == "ENCODING":
-                    cp = int(cp_parts[1])
-                elif ck == "DWIDTH":
-                    advance = int(cp_parts[1])
-                elif ck == "BBX":
-                    bbx = tuple(int(v) for v in cp_parts[1:5])
-                elif ck == "BITMAP":
-                    for bl in lines:
-                        if bl.strip() == "ENDCHAR":
-                            break
-                        rows.append(int(bl.strip(), 16))
-                    break
-            if cp is None or advance is None or bbx is None:
-                sys.exit(f"malformed glyph near codepoint {cp}")
-            glyphs[cp] = (advance, bbx, rows)
+def apply_coords(face, coords):
+    """coords: "wght=700,wdth=75" -> set variable-font design axes."""
+    if not coords:
+        return
+    want = {}
+    for kv in coords.split(","):
+        tag, val = kv.split("=")
+        want[tag.strip()] = float(val)
+    info = face.get_variation_info()
+    design = []
+    for axis in info.axes:
+        tag = axis.tag
+        if isinstance(tag, bytes):
+            tag = tag.decode("latin-1")
+        design.append(want.get(tag, axis.default))
+    face.set_var_design_coords(design)
 
-    if ascent is None or descent is None:
-        # fall back to the font bounding box when properties are absent
-        ascent = fbb[1] + fbb[3]
-        descent = -fbb[3]
-    return ascent, descent, glyphs
+
+def load_source(path, size, coords, hint, cps, glyphs):
+    """Renders glyphs into `glyphs` using lv_font_conv's exact FreeType
+    recipe: FT_Set_Pixel_Sizes(0,size); autohinter at TARGET_NORMAL
+    (--autohint-strong) / TARGET_LIGHT (default) / NO_AUTOHINT (off);
+    render MONO; advance from the linear (unhinted) advance."""
+    face = freetype.Face(path)
+    apply_coords(face, coords)
+    face.set_pixel_sizes(0, size)
+
+    # exactly lv_font_conv's flag construction (lib/freetype/index.js):
+    # base FT_LOAD_RENDER; TARGET_NORMAL for --autohint-strong else
+    # TARGET_LIGHT; NO_AUTOHINT for --autohint-off else FORCE_AUTOHINT;
+    # then TARGET_MONO OR-ed in for the 1-bpp case
+    flags = freetype.FT_LOAD_RENDER
+    flags |= 0 if hint == "strong" else freetype.FT_LOAD_TARGET_LIGHT
+    flags |= (freetype.FT_LOAD_NO_AUTOHINT if hint == "off"
+              else freetype.FT_LOAD_FORCE_AUTOHINT)
+    flags |= freetype.FT_LOAD_TARGET_MONO
+
+    for cp in cps:
+        if cp in glyphs:
+            continue                        # earlier source wins
+        if face.get_char_index(cp) == 0:
+            continue                        # not in this face
+        face.load_char(cp, flags)
+        g = face.glyph
+        bm = g.bitmap
+        bw, bh = bm.width, bm.rows
+        pitch = abs(bm.pitch)
+        rowbytes = (bw + 7) // 8
+        rows = []
+        for r in range(bh):
+            chunk = bytes(bm.buffer[r * pitch:r * pitch + rowbytes])
+            rows.append(int.from_bytes(chunk, "big") if chunk else 0)
+        # lv_font_conv uses the linear (unhinted) horizontal advance
+        advance = round(g.linearHoriAdvance / 65536.0)
+        # bbx = (w, h, xoff, yoff); yoff = bbox bottom vs baseline = top - h
+        bbx = (bw, bh, g.bitmap_left, g.bitmap_top - bh)
+        glyphs[cp] = (advance, bbx, rows)
 
 
 def glyph_cell(ascent, descent, advance, bbx, rows):
     """Rasterises a glyph into a (height x advance) boolean grid."""
     height = ascent + descent
-    width = advance
+    width = max(advance, 0)
     bw, bh, xoff, yoff = bbx
     grid = [[False] * width for _ in range(height)]
-    # BDF row 0 is the top of the bounding box; the box top sits at
-    # ascent - bh - yoff from the cell top
+    # the glyph box top sits at ascent - bh - yoff from the cell top
     top = ascent - bh - yoff
-    for ry, bits in enumerate(rows[:bh]):
+    for ry in range(bh):
         y = top + ry
         if not 0 <= y < height:
             continue
-        # bitmap rows are byte-padded and MSB-left
+        bits = rows[ry]
         rowbytes = (bw + 7) // 8
         for bx in range(bw):
             x = xoff + bx
@@ -151,7 +179,6 @@ def encode_rle(width, height, grid):
     pos = 0
     total = width * height
     while pos < total:
-        # measure the maximal continuous run of this colour, row-major
         run = 0
         while pos + run < total:
             xx = (pos + run) % width
@@ -184,21 +211,17 @@ def emit(name, font_var, ascent, descent, glyphs, use_rle):
     height = ascent + descent
     for cp in range(first, last + 1):
         g = glyphs.get(cp)
+        offsets.append(len(data))
         if g is None:
-            # gap inside the range: empty glyph, zero advance
-            widths.append(0)
-            offsets.append(len(data))
-            if use_rle:
-                data += encode_rle(0, height, [[]] * height)
+            widths.append(0)                    # gap: empty zero-width glyph
             continue
         w, h, grid = glyph_cell(ascent, descent, *g)
         widths.append(w)
-        offsets.append(len(data))
         data += encode_rle(w, h, grid) if use_rle else encode_raw(w, h, grid)
 
     if len(data) > 0xFFFF:
         sys.exit(f"glyph data is {len(data)} bytes; Font.offsets is "
-                 f"uint16 (max 65535). Use --rle or split the range.")
+                 f"uint16 (max 65535). Use --rle or a smaller range.")
 
     fmt = "FontFormat::RLE" if use_rle else "FontFormat::Raw"
     missing = widths[ord(' ') - first] if first <= ord(' ') <= last else 0
@@ -243,20 +266,84 @@ def emit(name, font_var, ascent, descent, glyphs, use_rle):
     return cpp, h
 
 
-def main():
-    ap = argparse.ArgumentParser(description="BDF -> mono-gfx Font generator")
-    ap.add_argument("bdf", help="input BDF font")
-    ap.add_argument("--name", required=True,
-                    help="output base name, e.g. FontTiny")
-    ap.add_argument("--var", help="C++ Font variable name (default: --name)")
-    ap.add_argument("--rle", action="store_true",
-                    help="emit the RLE compressed format")
-    ap.add_argument("--out", default=".", help="output directory")
-    args = ap.parse_args()
+class _Font(argparse.Action):
+    """Starts a new source group."""
+    def __call__(self, parser, ns, value, opt=None):
+        ns.sources.append({"path": value, "coords": None, "range": None,
+                            "symbols": None, "hint": "default"})
 
-    ascent, descent, glyphs = parse_bdf(args.bdf)
+
+class _SourceOpt(argparse.Action):
+    """An option that binds to the most recent --font."""
+    def __call__(self, parser, ns, value, opt=None):
+        if not ns.sources:
+            parser.error(f"{opt} must follow a --font")
+        ns.sources[-1][self.dest] = value
+
+
+class _Hint(argparse.Action):
+    """--autohint-strong / --autohint-off, bound to the current --font."""
+    def __init__(self, *a, **k):
+        k["nargs"] = 0
+        super().__init__(*a, **k)
+
+    def __call__(self, parser, ns, value, opt=None):
+        if not ns.sources:
+            parser.error(f"{opt} must follow a --font")
+        ns.sources[-1]["hint"] = "strong" if opt == "--autohint-strong" \
+            else "off"
+
+
+def parse_args(argv):
+    p = argparse.ArgumentParser(
+        prog="mono-font-gen.py",
+        description="Rasterise TTF/OTF fonts into a flat mono-gfx Font "
+                    "table. Several --font sources merge into one output; "
+                    "--range/--symbols/--coords/--autohint-* bind to the "
+                    "--font they follow.")
+    p.add_argument("--name", required=True, help="output base name")
+    p.add_argument("--var", help="C++ Font variable name (default: --name)")
+    p.add_argument("--out", default=".", help="output directory")
+    p.add_argument("--size", type=int, required=True,
+                   help="pixel size")
+    p.add_argument("--rle", action="store_true",
+                   help="emit the RLE compressed format")
+    p.add_argument("--font", action=_Font, metavar="PATH",
+                   help="add a source face (repeatable)")
+    p.add_argument("--coords", action=_SourceOpt, metavar="tag=val,...",
+                   help="variable-font design axes for the current font")
+    p.add_argument("--range", dest="range", action=_SourceOpt,
+                   metavar="A-B,C", help="codepoint range(s)")
+    p.add_argument("--symbols", action=_SourceOpt, metavar="CHARS",
+                   help="literal characters to include")
+    p.add_argument("--autohint-strong", action=_Hint,
+                   help="FT_LOAD_TARGET_NORMAL hinting for the current font")
+    p.add_argument("--autohint-off", action=_Hint,
+                   help="disable autohinting for the current font")
+
+    args = p.parse_args(argv, argparse.Namespace(sources=[]))
+    if not args.sources:
+        p.error("at least one --font is required")
+    return args
+
+
+def main():
+    args = parse_args(sys.argv[1:])
+    glyphs = {}
+    for s in args.sources:
+        cps = parse_codepoints(s["range"], s["symbols"])
+        if not cps:
+            sys.exit(f"source {s['path']} has no --range/--symbols")
+        load_source(s["path"], args.size, s["coords"], s["hint"],
+                    cps, glyphs)
     if not glyphs:
-        sys.exit("no glyphs found")
+        sys.exit("no glyphs rendered")
+    # ascent/descent are the bbox extremes over the rendered set, exactly
+    # as lv_font_conv computes them (not the face metrics)
+    tops = [bbx[3] + bbx[1] for _, bbx, _ in glyphs.values()]    # yoff + h
+    bots = [bbx[3] for _, bbx, _ in glyphs.values()]             # yoff
+    ascent = max(tops)
+    descent = -min(bots)
     cpp, h = emit(args.name, args.var or args.name,
                   ascent, descent, glyphs, args.rle)
 
