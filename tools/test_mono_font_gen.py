@@ -146,7 +146,28 @@ def run_goldens():
     return fails
 
 
+def run_ranges():
+    """build_ranges: contiguous runs, gaps, multi-range, unsorted in."""
+    fails = 0
+    cases = [
+        ([0x20, 0x21, 0x22], [(0x20, 3, 0)]),
+        ([0x20, 0x21, 0xF013], [(0x20, 2, 0), (0xF013, 1, 2)]),
+        ([0x41, 0x42, 0x44, 0xF240, 0xF241],
+         [(0x41, 2, 0), (0x44, 1, 2), (0xF240, 2, 3)]),
+        ([0xB0], [(0xB0, 1, 0)]),
+        ([0xF241, 0x20, 0xF240], [(0x20, 1, 0), (0xF240, 2, 1)]),
+    ]
+    for cps, want in cases:
+        got = mfg.build_ranges(cps)
+        if got != want:
+            print(f"FAIL build_ranges {cps}: {got} != {want}")
+            fails += 1
+        else:
+            print(f"ok   build_ranges {cps}")
+    return fails
+
+
 if __name__ == "__main__":
-    n = run_roundtrip() + run_goldens()
+    n = run_roundtrip() + run_goldens() + run_ranges()
     print(f"\n{'PASSED' if n == 0 else f'{n} FAILED'}")
     sys.exit(1 if n else 0)

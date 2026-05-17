@@ -161,10 +161,20 @@ tools/mono-font-gen.py --name FontUI --size 24 --rle \
     --font Icons.otf --range 0xF240-0xF244,0xF072
 ```
 
+Merged sources produce a **multi-range `Font`** (LVGL-style cmap): only
+the code points actually present are emitted, grouped into contiguous
+`FontRange` runs, so ASCII plus scattered icon code points cost a few
+range records and the real glyphs — not a 60k-entry sparse table.
+Glyphs keep their **real Unicode code points** (no application-side
+remapping): draw them with a UTF-8 string via `DrawText`, or by code
+point via `DrawGlyph(x, y, font, codepoint)`. `Font::GlyphIndex`
+resolves a code point through the ranges; a hand-written `Font` with
+`ranges == nullptr` still uses the simple `firstChar`/`charCount` form.
+
 The encoder is independently pinned by `tools/test_mono_font_gen.py`, a
-deterministic round-trip + golden self-test (no fonts, no FreeType); the
-on-target decoder is pinned by the `FontRLE` C++ sanity suite against
-hand-written bytes — the two meet in the middle on the wire format.
+deterministic round-trip + golden + `build_ranges` self-test (no fonts,
+no FreeType); the on-target decoder is pinned by the `FontRLE`/`Cmap`
+C++ sanity suites — the two meet in the middle on the wire format.
 
 ## Primitives
 
