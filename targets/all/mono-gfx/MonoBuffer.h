@@ -124,6 +124,37 @@ public:
     //! Fills a rectangle with rounded corners of radius @p r
     void FillRoundRect(int x, int y, int width, int height, int r, DrawOp op = DrawOp::Set);
 
+    //! Draws a circular arc of radius @p r between two angles
+    /*!
+     * Angles are integer degrees measured from the positive X axis and
+     * increasing towards the positive Y axis (clockwise on a screen whose
+     * Y grows downward). The sweep runs from @p startDeg to @p endDeg in
+     * the direction of increasing angle; pass @c endDeg < @c startDeg or a
+     * span wider than 360 and it is normalised so the arc is never empty
+     * unless @p startDeg == @p endDeg. A full circle is drawn slightly
+     * cheaper by @ref DrawCircle, prefer that for closed rings.
+     */
+    void DrawArc(int cx, int cy, int r, int startDeg, int endDeg, DrawOp op = DrawOp::Set);
+
+    //! Draws the outline of the triangle (@p x0,@p y0)-(@p x1,@p y1)-(@p x2,@p y2)
+    void DrawTriangle(int x0, int y0, int x1, int y1, int x2, int y2, DrawOp op = DrawOp::Set);
+    //! Fills the triangle (@p x0,@p y0)-(@p x1,@p y1)-(@p x2,@p y2)
+    void FillTriangle(int x0, int y0, int x1, int y1, int x2, int y2, DrawOp op = DrawOp::Set);
+
+    //! Blits @p src rotated by @p angleDeg degrees onto this buffer
+    /*!
+     * The point (@p pivotX, @p pivotY) in source space is mapped onto the
+     * destination coordinate (@p destX, @p destY); the source is then
+     * rotated around that pivot by @p angleDeg degrees (positive angles
+     * rotate the positive X axis towards the positive Y axis). Sampling is
+     * nearest-neighbour, which is the right trade-off for 1-bpp marker /
+     * needle sprites. The source is always treated as a foreground mask:
+     * only destination pixels under a set source pixel are touched, exactly
+     * like the mask blit ops, so @p op is restricted to @ref DrawOp.
+     */
+    void BlitRotated(int destX, int destY, const MonoBuffer& src,
+        int pivotX, int pivotY, int angleDeg, DrawOp op = DrawOp::Set);
+
     //! Copies a source buffer onto this one at (@p x, @p y) using the specified blit op
     void Blit(int x, int y, const MonoBuffer& src, BlitOp op = BlitOp::Copy);
     //! Copies a source rectangle onto this one at (@p x, @p y) using the specified blit op
