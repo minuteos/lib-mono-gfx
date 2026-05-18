@@ -111,29 +111,6 @@ def load_source(path, size, coords, hint, cps, glyphs):
         glyphs[cp] = (advance, bbx, rows)
 
 
-def glyph_cell(ascent, descent, advance, bbx, rows):
-    """Rasterises a glyph into a (height x advance) boolean grid."""
-    height = ascent + descent
-    width = max(advance, 0)
-    bw, bh, xoff, yoff = bbx
-    grid = [[False] * width for _ in range(height)]
-    # the glyph box top sits at ascent - bh - yoff from the cell top
-    top = ascent - bh - yoff
-    for ry in range(bh):
-        y = top + ry
-        if not 0 <= y < height:
-            continue
-        bits = rows[ry]
-        rowbytes = (bw + 7) // 8
-        for bx in range(bw):
-            x = xoff + bx
-            if 0 <= x < width:
-                byte = (bits >> (8 * (rowbytes - 1 - bx // 8))) & 0xFF
-                if byte & (0x80 >> (bx % 8)):
-                    grid[y][x] = True
-    return width, height, grid
-
-
 def encode_raw(width, height, grid):
     """Row-major MSB-first, (width+7)//8 bytes per row."""
     stride = (width + 7) // 8
@@ -214,29 +191,53 @@ def build_ranges(cps):
     return ranges
 
 
+def blackbox_grid(bbx, rows):
+    """Unpacks the tight inked box (bw x bh) from load_source's rows."""
+    bw, bh = bbx[0], bbx[1]
+    rowbytes = (bw + 7) // 8
+    grid = []
+    for r in range(bh):
+        bits = rows[r]
+        grid.append([bool((bits >> (8 * (rowbytes - 1 - c // 8)))
+                          & (0x80 >> (c % 8))) for c in range(bw)])
+    return bw, bh, grid
+
+
 def emit(name, font_var, ascent, descent, glyphs, use_rle):
     cps = sorted(glyphs)
     ranges = build_ranges(cps)               # only present code points
 
     data = bytearray()
     offsets = []
-    widths = []
-    blobs = []                          # per-glyph (cp, width, encoded bytes)
+    advances = []
+    boxW, boxH, boxX, boxY = [], [], [], []
+    blobs = []                  # per-glyph (cp, adv, bw, bh, bx, by, bytes)
     height = ascent + descent
     for cp in cps:
-        w, h, grid = glyph_cell(ascent, descent, *glyphs[cp])
-        enc = encode_rle(w, h, grid) if use_rle else encode_raw(w, h, grid)
-        widths.append(w)
+        advance, bbx, rows = glyphs[cp]
+        bw, bh, grid = blackbox_grid(bbx, rows)
+        bx, by = bbx[2], bbx[3]
+        enc = encode_rle(bw, bh, grid) if use_rle else encode_raw(bw, bh, grid)
+        for v, lo, hi, what in ((advance, 0, 255, "advance"),
+                                (bw, 0, 255, "box width"),
+                                (bh, 0, 255, "box height"),
+                                (bx, -128, 127, "box x"),
+                                (by, -128, 127, "box y")):
+            if not lo <= v <= hi:
+                sys.exit(f"glyph U+{cp:04X} {what} {v} out of range "
+                         f"[{lo},{hi}] - font too large for the table")
+        advances.append(advance)
+        boxW.append(bw); boxH.append(bh); boxX.append(bx); boxY.append(by)
         offsets.append(len(data))
         data += enc
-        blobs.append((cp, w, bytes(enc)))
+        blobs.append((cp, advance, bw, bh, bx, by, bytes(enc)))
 
     if len(data) > 0xFFFF:
         sys.exit(f"glyph data is {len(data)} bytes; Font.offsets is "
                  f"uint16 (max 65535). Use --rle or a smaller range.")
 
     fmt = "FontFormat::RLE" if use_rle else "FontFormat::Raw"
-    missing = widths[cps.index(0x20)] if 0x20 in glyphs else 0
+    missing = advances[cps.index(0x20)] if 0x20 in glyphs else 0
 
     def arr(values, per_line, fmt_one):
         s = []
@@ -261,24 +262,33 @@ def emit(name, font_var, ascent, descent, glyphs, use_rle):
 
     def glyph_data():
         s, off = [], 0
-        for idx, (cp, w, enc) in enumerate(blobs):
-            s.append(f"\n    // [{idx}] {cp_label(cp)}  w={w} off={off}")
+        for idx, (cp, adv, bw, bh, bx, by, enc) in enumerate(blobs):
+            s.append(f"\n    // [{idx}] {cp_label(cp)}  adv={adv} "
+                     f"box={bw}x{bh}@({bx},{by}) off={off}")
             for j, b in enumerate(enc):
                 if j % 16 == 0:
                     s.append("\n   ")
                 s.append(f" 0x{b:02X},")
             if not enc:
-                s.append("\n        /* (no data) */")
+                s.append("\n        /* (empty) */")
             off += len(enc)
         return "".join(s)
 
     cpp = banner + f'\n#include "{name}.h"\n\n'
     cpp += "namespace {\n\n"
     cpp += "const uint8_t fontData[] = {" + glyph_data() + "\n};\n\n"
-    cpp += "const uint8_t fontWidths[] = {" + arr(
-        widths, 16, lambda v: f"{v}, ") + "\n};\n\n"
+    cpp += "const uint8_t fontAdvance[] = {" + arr(
+        advances, 16, lambda v: f"{v}, ") + "\n};\n\n"
     cpp += "const uint16_t fontOffsets[] = {" + arr(
         offsets, 12, lambda v: f"{v}, ") + "\n};\n\n"
+    cpp += "const uint8_t fontBoxW[] = {" + arr(
+        boxW, 16, lambda v: f"{v}, ") + "\n};\n\n"
+    cpp += "const uint8_t fontBoxH[] = {" + arr(
+        boxH, 16, lambda v: f"{v}, ") + "\n};\n\n"
+    cpp += "const int8_t fontBoxX[] = {" + arr(
+        boxX, 16, lambda v: f"{v}, ") + "\n};\n\n"
+    cpp += "const int8_t fontBoxY[] = {" + arr(
+        boxY, 16, lambda v: f"{v}, ") + "\n};\n\n"
     cpp += "const FontRange fontRanges[] = {\n"
     for first, count, base in ranges:
         cpp += f"    {{ 0x{first:X}, {count}, {base} }},\n"
@@ -290,10 +300,16 @@ def emit(name, font_var, ascent, descent, glyphs, use_rle):
     cpp += f"    .missingWidth = {missing},\n"
     cpp += "    .ranges = fontRanges,\n"
     cpp += f"    .rangeCount = {len(ranges)},\n"
-    cpp += "    .widths = fontWidths,\n"
+    cpp += "    .widths = fontAdvance,\n"
     cpp += "    .offsets = fontOffsets,\n"
     cpp += "    .data = fontData,\n"
     cpp += f"    .format = {fmt},\n"
+    cpp += f"    .ascent = {ascent},\n"
+    cpp += f"    .descent = {descent},\n"
+    cpp += "    .boxW = fontBoxW,\n"
+    cpp += "    .boxH = fontBoxH,\n"
+    cpp += "    .boxX = fontBoxX,\n"
+    cpp += "    .boxY = fontBoxY,\n"
     cpp += "};\n"
 
     h = banner + "\n#pragma once\n\n#include <mono-gfx/Font.h>\n\n"

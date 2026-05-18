@@ -15,15 +15,22 @@
 //! A single glyph located inside a Font's bitmap data
 struct Glyph
 {
-    //! Pointer to the glyph bitmap, or @c nullptr for missing glyphs
+    //! Pointer to the glyph black-box bitmap, or @c nullptr for missing
+    //! (or empty, e.g. space) glyphs
     /*!
      * Glyphs are stored in the same row-major MSB-first format as
-     * @ref MonoBuffer, with one row of @c (width+7)/8 bytes per pixel row,
-     * @c height rows total.
+     * @ref MonoBuffer, with one row of @c (bw+7)/8 bytes per pixel row,
+     * @c bh rows total - only the inked black box, not a full cell.
      */
     const uint8_t* bitmap;
-    //! Glyph width in pixels (always 0 when @ref bitmap is null)
+    //! Pen advance in pixels (a.k.a. glyph width; always @ref Font::missingWidth
+    //! for missing glyphs)
     uint8_t width;
+    //! Black-box dimensions in pixels (both 0 when @ref bitmap is null)
+    uint8_t bw, bh;
+    //! Black-box bearings: @ref bx left side bearing from the pen,
+    //! @ref by the box bottom relative to the baseline (LVGL convention)
+    int8_t bx, by;
 };
 
 //! Glyph bitmap storage scheme used by a @ref Font
@@ -119,6 +126,22 @@ struct Font
     const uint8_t* data;
     //! Glyph storage scheme; defaults to @ref FontFormat::Raw
     FontFormat format;
+    //! Distance from the cell top to the baseline. @c 0 selects the legacy
+    //! form: glyph data is a full <tt>advance x @ref height</tt> cell with
+    //! the origin at the cell top (no per-glyph black box).
+    uint8_t ascent;
+    //! Distance from the baseline to the cell bottom
+    //! (@ref height @c == ascent+descent)
+    uint8_t descent;
+    //! Optional per-glyph black-box metrics, parallel to @ref widths:
+    //! box width/height in pixels and the box bearings (left side bearing
+    //! @ref boxX, box bottom vs. baseline @ref boxY). @c nullptr selects
+    //! the legacy advance x @ref height cell form. @ref data then holds
+    //! only the inked box, not a padded cell.
+    const uint8_t* boxW;
+    const uint8_t* boxH;
+    const int8_t* boxX;
+    const int8_t* boxY;
 
     //! @c true if glyph data is run-length encoded
     ALWAYS_INLINE bool IsRLE() const { return format == FontFormat::RLE; }
@@ -146,14 +169,23 @@ struct Font
         int idx = GlyphIndex(codepoint);
         if (idx < 0)
         {
-            return Glyph { nullptr, missingWidth };
+            return Glyph { nullptr, missingWidth, 0, 0, 0, 0 };
         }
         if (widths)
         {
-            return Glyph { data + offsets[idx], widths[idx] };
+            unsigned i = unsigned(idx);
+            if (boxW)
+            {
+                return Glyph { data + offsets[i], widths[i],
+                               boxW[i], boxH[i], boxX[i], boxY[i] };
+            }
+            // legacy: the black box is the whole advance x height cell
+            return Glyph { data + offsets[i], widths[i],
+                           widths[i], height, 0, 0 };
         }
         unsigned stride = (fixedWidth + 7u) >> 3;
-        return Glyph { data + unsigned(idx) * stride * height, fixedWidth };
+        return Glyph { data + unsigned(idx) * stride * height,
+                       fixedWidth, fixedWidth, height, 0, 0 };
     }
 
     //! Walks the foreground horizontal runs of an RLE glyph
@@ -174,6 +206,12 @@ struct Font
             return;
         }
         unsigned index = unsigned(idx);
+        int bw = boxW ? boxW[index] : widths[index];
+        int bh = boxH ? boxH[index] : height;
+        if (bw <= 0 || bh <= 0)
+        {
+            return;                     // empty glyph (e.g. space)
+        }
         const uint8_t* p = data + offsets[index];
         bool hi = true;                 // high nibble of *p is read first
         auto nib = [&]() -> unsigned
@@ -196,7 +234,7 @@ struct Font
             return int(285 + ((a << 8) | (b << 4) | nib()));
         };
 
-        int total = int(widths[index]) * height;
+        int total = bw * bh;
         int px = 0, py = 0, pos = 0;
         bool fg = false;                // glyph starts on background
         while (pos < total)
@@ -204,11 +242,11 @@ struct Font
             int rem = run();
             while (rem > 0)
             {
-                int space = widths[index] - px;
+                int space = bw - px;
                 int take = rem < space ? rem : space;
                 if (fg) span(px, py, take);
                 px += take; pos += take; rem -= take;
-                if (px == widths[index]) { px = 0; py++; }
+                if (px == bw) { px = 0; py++; }
             }
             fg = !fg;
         }

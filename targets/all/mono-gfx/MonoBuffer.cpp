@@ -627,13 +627,19 @@ int MonoBuffer::DrawGlyph(int x, int y, const Font& font, unsigned cp, DrawOp op
     Glyph g = font.GetGlyph(cp);
     if (op != DrawOp::Keep)
     {
+        // place the black box: x + left side bearing, and (for fonts
+        // carrying metrics) baseline-relative vertically; ascent == 0
+        // keeps the legacy top-left-of-cell placement so fonts without
+        // per-glyph metrics are unaffected
+        int gx = x + g.bx;
+        int gy = y + (font.ascent ? font.ascent - (g.by + g.bh) : 0);
         if (font.IsRLE())
         {
             // RLE glyphs decode straight into horizontal runs - no temp
             // buffer, the op maps directly since spans are foreground only
-            font.ForEachSpan(cp, [this, x, y, op](int rx, int ry, int len)
+            font.ForEachSpan(cp, [this, gx, gy, op](int rx, int ry, int len)
             {
-                DrawHLine(x + rx, y + ry, len, op);
+                DrawHLine(gx + rx, gy + ry, len, op);
             });
         }
         else if (g.bitmap)
@@ -641,9 +647,8 @@ int MonoBuffer::DrawGlyph(int x, int y, const Font& font, unsigned cp, DrawOp op
             BlitOp blit = (op == DrawOp::Clear)  ? BlitOp::AndNot :
                           (op == DrawOp::Invert) ? BlitOp::Xor :
                                                    BlitOp::Or;
-            MonoBuffer src((void*)g.bitmap, g.width, font.height,
-                           (g.width + 7) >> 3);
-            Blit(x, y, src, 0, 0, g.width, font.height, blit);
+            MonoBuffer src((void*)g.bitmap, g.bw, g.bh, (g.bw + 7) >> 3);
+            Blit(gx, gy, src, 0, 0, g.bw, g.bh, blit);
         }
     }
     return x + g.width + font.spacing;
