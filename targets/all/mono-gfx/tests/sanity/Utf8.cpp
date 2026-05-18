@@ -16,19 +16,20 @@ namespace
 
 // solid 3x2 block: continuous bg0 fg6 -> nibbles 0,6 -> byte 0x06
 const uint8_t blk[] = { 0x06 };
-const uint8_t w1[] = { 3 };
-const uint16_t o1[] = { 0 };
+const GlyphMetric blkGlyphs[] = { { 0, 3, 3, 2, 0, 0 } };
 
 // U+00B0 (2-byte UTF-8) and U+2080 (3-byte UTF-8) one-glyph fonts
 const Font DegFont = {
-    .height = 2, .spacing = 1, .fixedWidth = 0, .missingWidth = 0,
+    .height = 2, .spacing = 1, .missingWidth = 0,
+    .ascent = 2, .descent = 0,
     .firstChar = 0x00B0, .charCount = 1,
-    .widths = w1, .offsets = o1, .data = blk, .format = FontFormat::RLE,
+    .glyphs = blkGlyphs, .data = blk, .format = FontFormat::RLE,
 };
 const Font SubFont = {
-    .height = 2, .spacing = 1, .fixedWidth = 0, .missingWidth = 0,
+    .height = 2, .spacing = 1, .missingWidth = 0,
+    .ascent = 2, .descent = 0,
     .firstChar = 0x2080, .charCount = 1,
-    .widths = w1, .offsets = o1, .data = blk, .format = FontFormat::RLE,
+    .glyphs = blkGlyphs, .data = blk, .format = FontFormat::RLE,
 };
 
 bool Same(const MonoBuffer& a, const MonoBuffer& b)

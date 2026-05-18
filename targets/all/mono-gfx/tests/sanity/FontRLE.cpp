@@ -31,18 +31,21 @@ const uint8_t rleData[] = {
     // 'C' blank 2x3: bg6 (single run, total = 6) -> nibble 6 (+pad)
     0x60,
 };
-const uint8_t rleWidths[] = { 3, 4, 2 };
-const uint16_t rleOffsets[] = { 0, 4, 5 };
+const GlyphMetric rleGlyphs[] = {
+    { 0, 3, 3, 3, 0, 0 },       // 'A' 3x3 at 0
+    { 4, 4, 4, 3, 0, 0 },       // 'B' 4x3 at 4
+    { 5, 2, 2, 3, 0, 0 },       // 'C' 2x3 at 5
+};
 
 const Font RleFont = {
     .height = 3,
     .spacing = 1,
-    .fixedWidth = 0,
     .missingWidth = 2,
+    .ascent = 3,
+    .descent = 0,
     .firstChar = 'A',
     .charCount = 3,
-    .widths = rleWidths,
-    .offsets = rleOffsets,
+    .glyphs = rleGlyphs,
     .data = rleData,
     .format = FontFormat::RLE,
 };
@@ -50,35 +53,32 @@ const Font RleFont = {
 // 8-bit tier: one glyph 'X', solid 20x2 -> bg0 fg40; 40 in 29..284
 //   nibbles 0, F,E,0,B
 const uint8_t d8[] = { 0x0F, 0xE0, 0xB0 };
-const uint8_t w8[] = { 20 };
-const uint16_t o8[] = { 0 };
+const GlyphMetric g8[] = { { 0, 20, 20, 2, 0, 0 } };
 const Font Font8 = {
-    .height = 2, .spacing = 0, .fixedWidth = 0, .missingWidth = 0,
+    .height = 2, .spacing = 0, .missingWidth = 0, .ascent = 2, .descent = 0,
     .firstChar = 'X', .charCount = 1,
-    .widths = w8, .offsets = o8, .data = d8, .format = FontFormat::RLE,
+    .glyphs = g8, .data = d8, .format = FontFormat::RLE,
 };
 
 // 12-bit tier: one glyph 'X', solid 200x2 -> bg0 fg400; 400 in 285..4380
 //   nibbles 0, F,F,0,7,3
 const uint8_t d12[] = { 0x0F, 0xF0, 0x73 };
-const uint8_t w12[] = { 200 };
-const uint16_t o12[] = { 0 };
+const GlyphMetric g12[] = { { 0, 200, 200, 2, 0, 0 } };
 const Font Font12 = {
-    .height = 2, .spacing = 0, .fixedWidth = 0, .missingWidth = 0,
+    .height = 2, .spacing = 0, .missingWidth = 0, .ascent = 2, .descent = 0,
     .firstChar = 'X', .charCount = 1,
-    .widths = w12, .offsets = o12, .data = d12, .format = FontFormat::RLE,
+    .glyphs = g12, .data = d12, .format = FontFormat::RLE,
 };
 
 // split tier: 'X' solid 100x50 -> fg run 5000 > 4380, generator-style
 //   split: bg0, fg4380, bg0(sep), fg620
 //   nibbles: 0 | F F F F F | 0 | F F 1 4 F
 const uint8_t dS[] = { 0x0F, 0xFF, 0xFF, 0x0F, 0xF1, 0x4F };
-const uint8_t wS[] = { 100 };
-const uint16_t oS[] = { 0 };
+const GlyphMetric gS[] = { { 0, 100, 100, 50, 0, 0 } };
 const Font FontSplit = {
-    .height = 50, .spacing = 0, .fixedWidth = 0, .missingWidth = 0,
+    .height = 50, .spacing = 0, .missingWidth = 0, .ascent = 50, .descent = 0,
     .firstChar = 'X', .charCount = 1,
-    .widths = wS, .offsets = oS, .data = dS, .format = FontFormat::RLE,
+    .glyphs = gS, .data = dS, .format = FontFormat::RLE,
 };
 
 TEST_CASE("01 ForEachSpan yields exact foreground runs")

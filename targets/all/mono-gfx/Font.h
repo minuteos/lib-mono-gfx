@@ -58,58 +58,56 @@ struct FontRange
     uint16_t glyphBase;     //!< glyph index of @ref first
 };
 
+//! Packed per-glyph metrics (parallel to the cmap, one per glyph index)
+struct GlyphMetric
+{
+    uint16_t offset;        //!< byte offset of the black box in @ref Font::data
+    uint8_t advance;        //!< pen advance in pixels
+    uint8_t bw, bh;         //!< black-box width / height in pixels
+    int8_t bx, by;          //!< black-box left bearing / bottom-vs-baseline
+};
+
 //! A bitmap font usable with @ref MonoBuffer::DrawText
 /*!
- * A font is a packed bitmap, optional offset and width tables and a few
- * scalar fields. Two layouts are supported:
+ * Each glyph is stored as just its inked black box (no padded cell);
+ * @ref glyphs gives its byte @ref GlyphMetric::offset into @ref data,
+ * its @ref GlyphMetric::advance and the box size/bearings. The glyph is
+ * placed at <tt>pen.x + bx</tt>, <tt>pen.y + @ref ascent - (by + bh)</tt>
+ * (baseline-relative, LVGL convention). Code-point coverage is either a
+ * single contiguous range <tt>[firstChar, firstChar + charCount)</tt>
+ * (when @ref ranges is null) or the set of @ref ranges (LVGL-style
+ * multi-range cmap, real Unicode code points). Code points outside the
+ * covered set get @ref missingWidth advance and no bitmap.
  *
- * - @b Fixed-width: @ref widths and @ref offsets are both null. Every
- *   glyph is @ref fixedWidth pixels wide. Glyph @c n starts at byte
- *   @c n*((fixedWidth+7)/8)*height in @ref data. Only valid for
- *   @ref FontFormat::Raw.
- *
- * - @b Variable-width: @ref widths and @ref offsets are non-null.
- *   Glyph @c n is @c widths[n] pixels wide and starts at byte
- *   @c offsets[n] in @ref data.
- *
- * Code-point coverage is either a single contiguous range
- * <tt>[firstChar, firstChar + charCount)</tt> (when @ref ranges is null)
- * or, for fonts mixing e.g. ASCII with scattered icons, the set of
- * @ref ranges (LVGL-style multi-range cmap, real Unicode code points).
- * Code points outside the covered set are rendered with width
- * @ref missingWidth and no bitmap.
- *
- * When @ref format is @ref FontFormat::RLE the glyph data is a
- * @b continuous run-length stream (not per row) instead of a raw bitmap.
- * The glyph is treated as @c width*height pixels in row-major order; runs
- * of equal colour alternate starting with @b background (a glyph that
- * begins on a set pixel starts with a zero-length background run). Each
- * run length is read from a nibble stream, high nibble of each byte
- * first, glyphs byte-aligned at @ref offsets:
+ * When @ref format is @ref FontFormat::RLE the black box is a continuous
+ * run-length stream (not per row): @c bw*bh pixels in row-major order,
+ * runs of equal colour alternating from @b background (a box starting on
+ * a set pixel begins with a zero-length background run). Each run length
+ * is read from a nibble stream, high nibble of each byte first:
  *
  * - @c 0x0..0xE         -> run length @c 0..14 (one nibble)
  * - @c 0xF, @c 0x0..0xD -> run length @c 15..28
  * - @c 0xF, @c 0xE, hi, lo            -> @c 29 + (8-bit big-endian nibbles)
  * - @c 0xF, @c 0xF, n2, n1, n0        -> @c 285 + (12-bit big-endian nibbles)
  *
- * The maximum encodable run is 4380; the (vanishingly rare) longer run is
- * split by the generator into chunks joined by a zero-length opposite-
- * colour run, so the decoder needs no special case. Decoding is O(runs),
- * allocation-free, every byte read once, and emits one
- * @ref MonoBuffer::DrawHLine per foreground run segment - a run crossing a
- * row boundary is simply split at the edge. RLE always uses the
- * variable-width table form.
+ * The maximum encodable run is 4380; a longer run is split by the
+ * generator into chunks joined by a zero-length opposite-colour run, so
+ * the decoder needs no special case. Decoding is O(runs), allocation-free
+ * and reads every nibble once. @ref FontFormat::Raw instead stores the
+ * box as a row-major MSB-first bitmap, @c (bw+7)/8 bytes per row.
  */
 struct Font
 {
-    //! Glyph height in pixels
+    //! Cell (line) height in pixels (@c == ascent+descent)
     uint8_t height;
-    //! Width in pixels added between adjacent glyphs (and used for spaces if not encoded)
+    //! Width in pixels added between adjacent glyphs
     uint8_t spacing;
-    //! Width of glyphs when @ref widths is null
-    uint8_t fixedWidth;
-    //! Width substituted for code points outside the encoded range
+    //! Advance substituted for code points outside the encoded range
     uint8_t missingWidth;
+    //! Distance from the cell top to the baseline
+    uint8_t ascent;
+    //! Distance from the baseline to the cell bottom
+    uint8_t descent;
     //! First encoded code point (single-range form; ignored if @ref ranges)
     uint16_t firstChar;
     //! Number of contiguous encoded code points (single-range form)
@@ -118,30 +116,12 @@ struct Font
     const FontRange* ranges;
     //! Number of entries in @ref ranges
     uint16_t rangeCount;
-    //! Per-glyph width in pixels, or @c nullptr for fixed-width fonts
-    const uint8_t* widths;
-    //! Per-glyph byte offset into @ref data, or @c nullptr for fixed-width fonts
-    const uint16_t* offsets;
-    //! Glyph bitmap data (raw bitmap or RLE stream per @ref format)
+    //! Per-glyph packed metric table (one entry per glyph index)
+    const GlyphMetric* glyphs;
+    //! Glyph black-box data (raw bitmap or RLE stream per @ref format)
     const uint8_t* data;
-    //! Glyph storage scheme; defaults to @ref FontFormat::Raw
+    //! Glyph storage scheme
     FontFormat format;
-    //! Distance from the cell top to the baseline. @c 0 selects the legacy
-    //! form: glyph data is a full <tt>advance x @ref height</tt> cell with
-    //! the origin at the cell top (no per-glyph black box).
-    uint8_t ascent;
-    //! Distance from the baseline to the cell bottom
-    //! (@ref height @c == ascent+descent)
-    uint8_t descent;
-    //! Optional per-glyph black-box metrics, parallel to @ref widths:
-    //! box width/height in pixels and the box bearings (left side bearing
-    //! @ref boxX, box bottom vs. baseline @ref boxY). @c nullptr selects
-    //! the legacy advance x @ref height cell form. @ref data then holds
-    //! only the inked box, not a padded cell.
-    const uint8_t* boxW;
-    const uint8_t* boxH;
-    const int8_t* boxX;
-    const int8_t* boxY;
 
     //! @c true if glyph data is run-length encoded
     ALWAYS_INLINE bool IsRLE() const { return format == FontFormat::RLE; }
@@ -171,21 +151,8 @@ struct Font
         {
             return Glyph { nullptr, missingWidth, 0, 0, 0, 0 };
         }
-        if (widths)
-        {
-            unsigned i = unsigned(idx);
-            if (boxW)
-            {
-                return Glyph { data + offsets[i], widths[i],
-                               boxW[i], boxH[i], boxX[i], boxY[i] };
-            }
-            // legacy: the black box is the whole advance x height cell
-            return Glyph { data + offsets[i], widths[i],
-                           widths[i], height, 0, 0 };
-        }
-        unsigned stride = (fixedWidth + 7u) >> 3;
-        return Glyph { data + unsigned(idx) * stride * height,
-                       fixedWidth, fixedWidth, height, 0, 0 };
+        const GlyphMetric& m = glyphs[idx];
+        return Glyph { data + m.offset, m.advance, m.bw, m.bh, m.bx, m.by };
     }
 
     //! Walks the foreground horizontal runs of an RLE glyph
@@ -201,18 +168,17 @@ struct Font
     void ForEachSpan(unsigned codepoint, Fn&& span) const
     {
         int idx = GlyphIndex(codepoint);
-        if (format != FontFormat::RLE || idx < 0 || !widths || !offsets)
+        if (format != FontFormat::RLE || idx < 0 || !glyphs)
         {
             return;
         }
-        unsigned index = unsigned(idx);
-        int bw = boxW ? boxW[index] : widths[index];
-        int bh = boxH ? boxH[index] : height;
+        const GlyphMetric& m = glyphs[idx];
+        int bw = m.bw, bh = m.bh;
         if (bw <= 0 || bh <= 0)
         {
             return;                     // empty glyph (e.g. space)
         }
-        const uint8_t* p = data + offsets[index];
+        const uint8_t* p = data + m.offset;
         bool hi = true;                 // high nibble of *p is read first
         auto nib = [&]() -> unsigned
         {

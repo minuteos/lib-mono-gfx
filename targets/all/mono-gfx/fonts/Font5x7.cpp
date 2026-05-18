@@ -10,6 +10,8 @@
 
 #include "Font5x7.h"
 
+#include <array>
+
 namespace
 {
 
@@ -217,17 +219,29 @@ constexpr uint8_t data[] = {
 
 #undef G
 
+constexpr unsigned GlyphCount = 0x7F - 0x20;
+
+//! Fixed 5x7 cell: glyph n is 7 bytes at n*7, full box, on the baseline
+constexpr std::array<GlyphMetric, GlyphCount> MakeGlyphs()
+{
+    std::array<GlyphMetric, GlyphCount> g{};
+    for (unsigned i = 0; i < GlyphCount; i++)
+        g[i] = GlyphMetric{ uint16_t(i * 7), 5, 5, 7, 0, 0 };
+    return g;
+}
+constexpr auto glyphs = MakeGlyphs();
+
 }
 
 const Font Font5x7 = {
     .height = 7,
     .spacing = 1,
-    .fixedWidth = 5,
     .missingWidth = 5,
+    .ascent = 7,
+    .descent = 0,
     .firstChar = 0x20,
-    .charCount = 0x7F - 0x20,
-    .widths = nullptr,
-    .offsets = nullptr,
+    .charCount = GlyphCount,
+    .glyphs = glyphs.data(),
     .data = data,
     .format = FontFormat::Raw,
 };

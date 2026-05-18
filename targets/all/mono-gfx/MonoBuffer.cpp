@@ -627,12 +627,10 @@ int MonoBuffer::DrawGlyph(int x, int y, const Font& font, unsigned cp, DrawOp op
     Glyph g = font.GetGlyph(cp);
     if (op != DrawOp::Keep)
     {
-        // place the black box: x + left side bearing, and (for fonts
-        // carrying metrics) baseline-relative vertically; ascent == 0
-        // keeps the legacy top-left-of-cell placement so fonts without
-        // per-glyph metrics are unaffected
+        // place the black box: x + left side bearing, baseline-relative
+        // vertically (font.ascent is the baseline from the cell top)
         int gx = x + g.bx;
-        int gy = y + (font.ascent ? font.ascent - (g.by + g.bh) : 0);
+        int gy = y + font.ascent - (g.by + g.bh);
         if (font.IsRLE())
         {
             // RLE glyphs decode straight into horizontal runs - no temp

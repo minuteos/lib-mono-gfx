@@ -17,13 +17,12 @@ namespace
 // one RLE glyph at U+2080 (> 0xFF, unreachable via a byte string):
 // a solid 3x2 block -> continuous bg0 fg6 -> nibbles 0,6 -> byte 0x06
 const uint8_t hiData[] = { 0x06 };
-const uint8_t hiWidth[] = { 3 };
-const uint16_t hiOff[] = { 0 };
+const GlyphMetric hiGlyphs[] = { { 0, 3, 3, 2, 0, 0 } };
 const Font HiFont = {
-    .height = 2, .spacing = 1, .fixedWidth = 0, .missingWidth = 0,
+    .height = 2, .spacing = 1, .missingWidth = 0,
+    .ascent = 2, .descent = 0,
     .firstChar = 0x2080, .charCount = 1,
-    .widths = hiWidth, .offsets = hiOff, .data = hiData,
-    .format = FontFormat::RLE,
+    .glyphs = hiGlyphs, .data = hiData, .format = FontFormat::RLE,
 };
 
 int CountSet(const MonoBuffer& b)

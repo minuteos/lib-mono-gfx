@@ -18,16 +18,18 @@ namespace
 // by its glyph width). Continuous RLE of a solid w-wide row = bg0, fg w
 // -> nibbles 0,w -> byte 0x0w.
 const uint8_t data[] = { 0x01, 0x02, 0x03, 0x04, 0x05 };
-const uint8_t widths[] = { 1, 2, 3, 4, 5 };
-const uint16_t offsets[] = { 0, 1, 2, 3, 4 };
+const GlyphMetric glyphs[] = {
+    { 0, 1, 1, 1, 0, 0 }, { 1, 2, 2, 1, 0, 0 }, { 2, 3, 3, 1, 0, 0 },
+    { 3, 4, 4, 1, 0, 0 }, { 4, 5, 5, 1, 0, 0 },
+};
 // two disjoint ranges: 'A'..'C' (glyphs 0..2), U+F240..U+F241 (glyphs 3..4)
 const FontRange ranges[] = { { 0x41, 3, 0 }, { 0xF240, 2, 3 } };
 
 const Font Cmap = {
-    .height = 1, .spacing = 0, .fixedWidth = 0, .missingWidth = 9,
+    .height = 1, .spacing = 0, .missingWidth = 9,
+    .ascent = 1, .descent = 0,
     .ranges = ranges, .rangeCount = 2,
-    .widths = widths, .offsets = offsets, .data = data,
-    .format = FontFormat::RLE,
+    .glyphs = glyphs, .data = data, .format = FontFormat::RLE,
 };
 
 int Count(const MonoBuffer& b)
