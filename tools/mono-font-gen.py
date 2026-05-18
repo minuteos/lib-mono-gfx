@@ -221,12 +221,15 @@ def emit(name, font_var, ascent, descent, glyphs, use_rle):
     data = bytearray()
     offsets = []
     widths = []
+    blobs = []                          # per-glyph (cp, width, encoded bytes)
     height = ascent + descent
     for cp in cps:
         w, h, grid = glyph_cell(ascent, descent, *glyphs[cp])
+        enc = encode_rle(w, h, grid) if use_rle else encode_raw(w, h, grid)
         widths.append(w)
         offsets.append(len(data))
-        data += encode_rle(w, h, grid) if use_rle else encode_raw(w, h, grid)
+        data += enc
+        blobs.append((cp, w, bytes(enc)))
 
     if len(data) > 0xFFFF:
         sys.exit(f"glyph data is {len(data)} bytes; Font.offsets is "
@@ -249,10 +252,29 @@ def emit(name, font_var, ascent, descent, glyphs, use_rle):
               f"{height}px, U+{cps[0]:04X}..U+{cps[-1]:04X}, "
               f"{len(ranges)} range(s), {len(cps)} glyphs)\n */\n")
 
+    def cp_label(cp):
+        if cp == 0x20:
+            return f"U+{cp:04X} ' '"
+        if 0x21 <= cp <= 0x7E:
+            return f"U+{cp:04X} '{chr(cp)}'"
+        return f"U+{cp:04X}"
+
+    def glyph_data():
+        s, off = [], 0
+        for idx, (cp, w, enc) in enumerate(blobs):
+            s.append(f"\n    // [{idx}] {cp_label(cp)}  w={w} off={off}")
+            for j, b in enumerate(enc):
+                if j % 16 == 0:
+                    s.append("\n   ")
+                s.append(f" 0x{b:02X},")
+            if not enc:
+                s.append("\n        /* (no data) */")
+            off += len(enc)
+        return "".join(s)
+
     cpp = banner + f'\n#include "{name}.h"\n\n'
     cpp += "namespace {\n\n"
-    cpp += "const uint8_t fontData[] = {" + arr(
-        data, 16, lambda v: f"0x{v:02X}, ") + "\n};\n\n"
+    cpp += "const uint8_t fontData[] = {" + glyph_data() + "\n};\n\n"
     cpp += "const uint8_t fontWidths[] = {" + arr(
         widths, 16, lambda v: f"{v}, ") + "\n};\n\n"
     cpp += "const uint16_t fontOffsets[] = {" + arr(
