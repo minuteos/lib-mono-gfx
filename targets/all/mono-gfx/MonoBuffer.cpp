@@ -27,10 +27,10 @@ ALWAYS_INLINE static void ApplyOpRun(uint8_t* dst, size_t n, DrawOp op)
 
 bool MonoBuffer::ClipRect(int& x, int& y, int& width, int& height) const
 {
-    if (x < 0) { width += x; x = 0; }
-    if (y < 0) { height += y; y = 0; }
-    if (x + width > w) width = w - x;
-    if (y + height > h) height = h - y;
+    if (x < cx0) { width += x - cx0; x = cx0; }
+    if (y < cy0) { height += y - cy0; y = cy0; }
+    if (x + width > cx1) width = cx1 - x;
+    if (y + height > cy1) height = cy1 - y;
     return width > 0 && height > 0;
 }
 
@@ -48,6 +48,11 @@ MonoBuffer MonoBuffer::ByteWindow(int x, int y, int width, int height) const
 
 void MonoBuffer::InvertAll()
 {
+    if (HasClip())
+    {
+        FillRect(cx0, cy0, cx1 - cx0, cy1 - cy0, DrawOp::Invert);
+        return;
+    }
     auto e = p + Size();
     auto q = p;
     while (q + 4 <= e)
@@ -509,12 +514,12 @@ void MonoBuffer::Blit(int x, int y, const MonoBuffer& src, int sx, int sy, int w
     if (sy < 0) { y -= sy; height += sy; sy = 0; }
     if (sx + width > src.w) width = src.w - sx;
     if (sy + height > src.h) height = src.h - sy;
-    // clip the destination rect against this buffer; track the deltas so we
-    // can adjust the source origin in lock step
-    if (x < 0) { sx -= x; width += x; x = 0; }
-    if (y < 0) { sy -= y; height += y; y = 0; }
-    if (x + width > w) width = w - x;
-    if (y + height > h) height = h - y;
+    // clip the destination rect against this buffer's clip; track the
+    // deltas so we can adjust the source origin in lock step
+    if (x < cx0) { sx += cx0 - x; width -= cx0 - x; x = cx0; }
+    if (y < cy0) { sy += cy0 - y; height -= cy0 - y; y = cy0; }
+    if (x + width > cx1) width = cx1 - x;
+    if (y + height > cy1) height = cy1 - y;
     if (width <= 0 || height <= 0) return;
 
     int sShift = sx & 7;

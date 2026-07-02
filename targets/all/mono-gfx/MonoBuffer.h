@@ -39,6 +39,8 @@ class MonoBuffer
     uint8_t* p = nullptr;
     int16_t w = 0, h = 0;
     int16_t s = 0;
+    // clip rectangle for write operations (reads are unaffected)
+    int16_t cx0 = 0, cy0 = 0, cx1 = 0, cy1 = 0;
 
 public:
     //! Constructs an empty buffer
@@ -49,11 +51,13 @@ public:
      * The row stride is computed as @c (width+7)/8 bytes.
      */
     constexpr MonoBuffer(void* data, int width, int height)
-        : p((uint8_t*)data), w(width), h(height), s((width + 7) >> 3) {}
+        : p((uint8_t*)data), w(width), h(height), s((width + 7) >> 3),
+          cx1(width), cy1(height) {}
 
     //! Constructs a buffer with an explicit row stride in bytes
     constexpr MonoBuffer(void* data, int width, int height, int stride)
-        : p((uint8_t*)data), w(width), h(height), s(stride) {}
+        : p((uint8_t*)data), w(width), h(height), s(stride),
+          cx1(width), cy1(height) {}
 
     ALWAYS_INLINE constexpr uint8_t* Data() const { return p; }
     ALWAYS_INLINE constexpr int Width() const { return w; }
@@ -91,18 +95,44 @@ public:
         return p[y * s + (x >> 3)] & (0x80 >> (x & 7));
     }
 
-    //! Draws a single pixel; coordinates outside the buffer are silently clipped
+    //! Draws a single pixel; coordinates outside the buffer or the
+    //! current clip rectangle are silently discarded
     ALWAYS_INLINE void DrawPixel(int x, int y, DrawOp op = DrawOp::Set)
     {
-        if (unsigned(x) >= unsigned(w) || unsigned(y) >= unsigned(h)) return;
+        if (x < cx0 || x >= cx1 || y < cy0 || y >= cy1) return;
         ApplyDrawOp(p[y * s + (x >> 3)], 0x80 >> (x & 7), op);
     }
 
-    //! Fills the entire buffer with a single color
-    ALWAYS_INLINE void Clear() { memset(p, 0, Size()); }
-    //! Fills the entire buffer with @c 0xFF (all foreground)
-    ALWAYS_INLINE void FillAll() { memset(p, 0xFF, Size()); }
-    //! Inverts every pixel in the buffer
+    //! Restricts all subsequent write operations to the given rectangle
+    //! (intersected with the buffer bounds); reads are unaffected
+    void SetClip(int x, int y, int width, int height)
+    {
+        cx0 = x < 0 ? 0 : (x > w ? w : x);
+        cy0 = y < 0 ? 0 : (y > h ? h : y);
+        int x1 = x + width, y1 = y + height;
+        cx1 = x1 < cx0 ? cx0 : (x1 > w ? w : x1);
+        cy1 = y1 < cy0 ? cy0 : (y1 > h ? h : y1);
+    }
+
+    //! Removes the clip - writes are limited only by the buffer bounds
+    void ClearClip() { cx0 = 0; cy0 = 0; cx1 = w; cy1 = h; }
+
+    //! @c true if the current clip is narrower than the buffer
+    ALWAYS_INLINE bool HasClip() const { return cx0 || cy0 || cx1 != w || cy1 != h; }
+
+    //! Fills the clip region (the entire buffer when unclipped) with background
+    ALWAYS_INLINE void Clear()
+    {
+        if (HasClip()) FillRect(cx0, cy0, cx1 - cx0, cy1 - cy0, DrawOp::Clear);
+        else memset(p, 0, Size());
+    }
+    //! Fills the clip region (the entire buffer when unclipped) with foreground
+    ALWAYS_INLINE void FillAll()
+    {
+        if (HasClip()) FillRect(cx0, cy0, cx1 - cx0, cy1 - cy0, DrawOp::Set);
+        else memset(p, 0xFF, Size());
+    }
+    //! Inverts every pixel in the clip region
     void InvertAll();
 
     //! Draws a horizontal line of @p width pixels starting at (@p x, @p y)
@@ -194,18 +224,18 @@ private:
     //! Clips a horizontal run [x, x+width) to the buffer width and the row [0,h)
     ALWAYS_INLINE bool ClipRow(int& x, int y, int& width) const
     {
-        if (unsigned(y) >= unsigned(h)) return false;
-        if (x < 0) { width += x; x = 0; }
-        if (x + width > w) width = w - x;
+        if (y < cy0 || y >= cy1) return false;
+        if (x < cx0) { width += x - cx0; x = cx0; }
+        if (x + width > cx1) width = cx1 - x;
         return width > 0;
     }
 
     //! Clips a vertical run [y, y+height) to the buffer height and the column [0,w)
     ALWAYS_INLINE bool ClipColumn(int x, int& y, int& height) const
     {
-        if (unsigned(x) >= unsigned(w)) return false;
-        if (y < 0) { height += y; y = 0; }
-        if (y + height > h) height = h - y;
+        if (x < cx0 || x >= cx1) return false;
+        if (y < cy0) { height += y - cy0; y = cy0; }
+        if (y + height > cy1) height = cy1 - y;
         return height > 0;
     }
 
