@@ -14,3 +14,4 @@
 #include <mono-gfx/Font.h>
 #include <mono-gfx/MonoBuffer.h>
 #include <mono-gfx/MonoFormat.h>
+#include <mono-gfx/Ui.h>
