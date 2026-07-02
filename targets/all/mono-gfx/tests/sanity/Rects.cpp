@@ -146,4 +146,51 @@ TEST_CASE("07 FillRoundRect inside rectangle bounds")
     AssertEqual(b.GetPixel(27, 13), false);
 }
 
+
+TEST_CASE("08 FillRoundRect corner shape is round at small radii")
+{
+    // r=3 corner insets from the outermost row must be 2,1,0 (a quarter
+    // circle), not a single notch
+    uint8_t mem[64] = {};
+    MonoBuffer b(mem, 32, 16);
+    b.FillRoundRect(2, 2, 20, 10, 3);
+    static const int inset[] = { 2, 1, 0 };
+    for (int t = 0; t < 3; t++)
+    {
+        AssertEqual(b.GetPixel(2 + inset[t], 2 + t), true);          // first set px
+        if (inset[t])
+            AssertEqual(b.GetPixel(2 + inset[t] - 1, 2 + t), false); // one left of it
+        AssertEqual(b.GetPixel(21 - inset[t], 2 + t), true);         // mirrored right
+        AssertEqual(b.GetPixel(2 + inset[t], 11 - t), true);         // mirrored bottom
+    }
+}
+
+TEST_CASE("09 FillRoundRect boundary matches DrawRoundRect")
+{
+    // the outline must lie exactly on the fill's edge: clearing it from a
+    // fill leaves no outline pixel set, and it never paints outside the fill
+    for (int r : { 3, 5, 14, 16 })
+    {
+        uint8_t m1[16 * 40] = {}, m2[16 * 40] = {};
+        MonoBuffer f(m1, 100, 40), o(m2, 100, 40);
+        f.FillRoundRect(4, 2, 90, 36, r);
+        o.DrawRoundRect(4, 2, 90, 36, r);
+        for (int y = 0; y < 40; y++)
+            for (int x = 0; x < 100; x++)
+                if (o.GetPixel(x, y))
+                    AssertEqual(f.GetPixel(x, y), true);
+    }
+}
+
+TEST_CASE("10 FillRoundRect double invert is identity")
+{
+    uint8_t mem[16 * 40] = {};
+    MonoBuffer b(mem, 100, 40);
+    b.FillRoundRect(3, 1, 80, 30, 16, DrawOp::Invert);
+    b.FillRoundRect(3, 1, 80, 30, 16, DrawOp::Invert);
+    for (int y = 0; y < 40; y++)
+        for (int x = 0; x < 100; x++)
+            AssertEqual(b.GetPixel(x, y), false);
+}
+
 }

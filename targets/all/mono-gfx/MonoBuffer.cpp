@@ -273,37 +273,36 @@ void MonoBuffer::FillRoundRect(int x, int y, int width, int height, int r, DrawO
     int rmax = (width < height ? width : height) >> 1;
     if (r > rmax) r = rmax;
     if (r <= 0) { FillRect(x, y, width, height, op); return; }
+    if (r > 127) r = 127;   // corner extent table limit; plenty for any panel
 
-    // central straight band (full width, between top and bottom corner rows)
+    // per-row corner extension beyond the inner span, derived from the
+    // same midpoint arc as DrawRoundRect so the fill boundary and the
+    // outline are the same pixels; each row is drawn exactly once, which
+    // keeps DrawOp::Invert correct
+    uint8_t ext[127] = {};
+    auto rec = [&](int t, int a)
+    {
+        if (t >= 0 && t < r && ext[t] < a) ext[t] = a;
+    };
+    int xx = r, yy = 0, err = 1 - r;
+    while (yy <= xx)
+    {
+        rec(r - yy, xx);
+        rec(r - xx, yy);
+        yy++;
+        if (err < 0) { err += 2 * yy + 1; }
+        else { --xx; err += 2 * (yy - xx) + 1; }
+    }
+
+    // central straight band (full width, between the corner row blocks)
     FillRect(x, y + r, width, height - 2 * r, op);
 
-    // top and bottom rows are filled along with the corner sweeps
-    int xx = r, yy = 0, err = 1 - r;
-    int x0l = x + r;
-    int y0t = y + r, y0b = y + height - 1 - r;
     int innerW = width - 2 * r;
-    // initial span at y == 0 (the apex of the corner) covers the center span only
-    DrawHLine(x0l, y0t - r, innerW, op);
-    DrawHLine(x0l, y0b + r, innerW, op);
-    while (++yy <= xx)
+    for (int t = 0; t < r; t++)
     {
-        if (err < 0)
-        {
-            err += 2 * yy + 1;
-        }
-        else
-        {
-            DrawHLine(x0l - xx, y0t - yy, innerW + 2 * xx, op);
-            DrawHLine(x0l - xx, y0b + yy, innerW + 2 * xx, op);
-            --xx;
-            err += 2 * (yy - xx) + 1;
-            if (yy > xx) break;
-            DrawHLine(x0l - yy, y0t - xx - 1, innerW + 2 * yy, op);
-            DrawHLine(x0l - yy, y0b + xx + 1, innerW + 2 * yy, op);
-            continue;
-        }
-        DrawHLine(x0l - xx, y0t - yy, innerW + 2 * xx, op);
-        DrawHLine(x0l - xx, y0b + yy, innerW + 2 * xx, op);
+        int e = ext[t];
+        DrawHLine(x + r - e, y + t, innerW + 2 * e, op);
+        DrawHLine(x + r - e, y + height - 1 - t, innerW + 2 * e, op);
     }
 }
 
