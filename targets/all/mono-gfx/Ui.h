@@ -85,6 +85,11 @@ public:
     //! Draw-pass context: only ops intersecting @p dirty are painted
     Ui(MonoBuffer& fb, const UiDirty& dirty) : fb(&fb), dirty(&dirty), mode(Mode::Draw) {}
 
+    //! Logical screen dimensions - screens should lay out against these
+    //! rather than compile-time constants so rotation just works
+    int Width() const { return fb->Width(); }
+    int Height() const { return fb->Height(); }
+
     //! Tight ink box of an ASCII string: x/y are the ink offset from the
     //! pen origin, w/h its extent
     struct Ink { int x, y, w, h; };
