@@ -5,10 +5,166 @@
  *
  * mono-gfx/Ui.cpp
  *
- * Text kit and panel chrome implementations.
+ * Text kit, panel chrome and the op diff for incremental rendering.
  */
 
 #include "Ui.h"
+
+// ---- UiDirty
+
+void UiDirty::Add(int x, int y, int w, int h)
+{
+    if (w <= 0 || h <= 0) return;
+    int16_t x0 = x, y0 = y, x1 = x + w, y1 = y + h;
+
+    // grow an overlapping/touching rect if one exists
+    for (int i = 0; i < count; i++)
+    {
+        R& r = rects[i];
+        if (x0 <= r.x1 && x1 >= r.x0 && y0 <= r.y1 && y1 >= r.y0)
+        {
+            if (x0 < r.x0) r.x0 = x0;
+            if (y0 < r.y0) r.y0 = y0;
+            if (x1 > r.x1) r.x1 = x1;
+            if (y1 > r.y1) r.y1 = y1;
+            return;
+        }
+    }
+
+    if (count < MaxRects)
+    {
+        rects[count++] = { x0, y0, x1, y1 };
+        return;
+    }
+
+    // full: merge into the rect that grows the least
+    int best = 0;
+    int32_t bestGrowth = INT32_MAX;
+    for (int i = 0; i < count; i++)
+    {
+        const R& r = rects[i];
+        int32_t ux0 = x0 < r.x0 ? x0 : r.x0, uy0 = y0 < r.y0 ? y0 : r.y0;
+        int32_t ux1 = x1 > r.x1 ? x1 : r.x1, uy1 = y1 > r.y1 ? y1 : r.y1;
+        int32_t growth = (ux1 - ux0) * (uy1 - uy0) - (r.x1 - r.x0) * (r.y1 - r.y0);
+        if (growth < bestGrowth) { bestGrowth = growth; best = i; }
+    }
+    R& r = rects[best];
+    if (x0 < r.x0) r.x0 = x0;
+    if (y0 < r.y0) r.y0 = y0;
+    if (x1 > r.x1) r.x1 = x1;
+    if (y1 > r.y1) r.y1 = y1;
+}
+
+bool UiDirty::Intersects(int x, int y, int w, int h) const
+{
+    int16_t x0 = x, y0 = y, x1 = x + w, y1 = y + h;
+    for (int i = 0; i < count; i++)
+    {
+        const R& r = rects[i];
+        if (x0 < r.x1 && x1 > r.x0 && y0 < r.y1 && y1 > r.y0)
+            return true;
+    }
+    return false;
+}
+
+// ---- UiDiff
+
+void UiDiff::Note(int x, int y, int w, int h, uint32_t hash, bool volatileOp)
+{
+    if (!slots || count >= cap)
+    {
+        overflow = true;
+        return;
+    }
+    if (!volatileOp && count < prevCount)
+    {
+        const UiSlot& p = slots[count];
+        if (p.x == x && p.y == y && p.w == w && p.h == h && p.hash == hash)
+        {
+            count++;
+            return;
+        }
+        dirty.Add(p.x, p.y, p.w, p.h);      // where the old content was
+    }
+    dirty.Add(x, y, w, h);
+    slots[count++] = { int16_t(x), int16_t(y), int16_t(w), int16_t(h), hash };
+}
+
+const UiDirty& UiDiff::End(int screenW, int screenH)
+{
+    // ops that disappeared leave their old pixels dirty
+    for (int i = count; i < prevCount; i++)
+        dirty.Add(slots[i].x, slots[i].y, slots[i].w, slots[i].h);
+
+    if (overflow || forceFull)
+    {
+        dirty.SetAll(screenW, screenH);
+        forceFull = false;
+        // an overflowing frame leaves the table incomplete; resync fully
+        prevCount = overflow ? 0 : count;
+        return dirty;
+    }
+
+    prevCount = count;
+
+    // op rectangles may extend off screen, the repaintable region does not
+    int n = 0;
+    for (int i = 0; i < dirty.count; i++)
+    {
+        auto r = dirty.rects[i];
+        if (r.x0 < 0) r.x0 = 0;
+        if (r.y0 < 0) r.y0 = 0;
+        if (r.x1 > screenW) r.x1 = screenW;
+        if (r.y1 > screenH) r.y1 = screenH;
+        if (r.x0 < r.x1 && r.y0 < r.y1)
+            dirty.rects[n++] = r;
+    }
+    dirty.count = n;
+    return dirty;
+}
+
+// ---- op hashing
+
+namespace
+{
+
+struct OpHash
+{
+    uint32_t v = 2166136261u;
+    OpHash& M(uint32_t x)
+    {
+        for (int i = 0; i < 4; i++, x >>= 8)
+            v = (v ^ (x & 0xFF)) * 16777619u;
+        return *this;
+    }
+    OpHash& P(const void* p) { return M(uint32_t(uintptr_t(p))); }
+    OpHash& S(const char* s)
+    {
+        while (*s) v = (v ^ uint8_t(*s++)) * 16777619u;
+        return *this;
+    }
+};
+
+}
+
+bool Ui::Note(uint32_t tag, int x, int y, int w, int h, uint32_t hash, bool volatileOp)
+{
+    switch (mode)
+    {
+        case Mode::Direct:
+            return true;
+        case Mode::Collect:
+            diff->Note(x, y, w, h, OpHash().M(tag).M(hash).v, volatileOp);
+            return false;
+        case Mode::Draw:
+            // volatile ops added their rect to the dirty region during
+            // collect, so a plain intersection test covers them too
+            return dirty->Intersects(x, y, w, h);
+    }
+    return true;
+}
+
+// ---- text kit
 
 Ui::Ink Ui::MeasureInk(const Font& f, const char* s)
 {
@@ -34,9 +190,33 @@ Ui::Ink Ui::MeasureInk(const Font& f, const char* s)
     return { x0, y0, x1 - x0, y1 - y0 };
 }
 
+void Ui::Text(int x, int y, const Font& f, const char* s, DrawOp op)
+{
+    int w = MonoBuffer::MeasureText(f, s);
+    int lines = 1;
+    for (const char* q = s; *q; q++)
+        if (*q == '\n') lines++;
+    // pad the box horizontally for glyph side bearings
+    if (Note(2, x - 2, y, w + 4, (lines - 1) * (f.height + f.spacing) + f.height,
+             OpHash().M(x).M(y).P(&f).M(unsigned(op)).S(s).v))
+        fb->DrawText(x, y, f, s, op);
+}
+
+void Ui::Glyph(int x, int y, const Font& f, unsigned cp, DrawOp op)
+{
+    ::Glyph g = f.GetGlyph(cp);
+    if (Note(3, x - 2, y, g.width + 4, f.height,
+             OpHash().M(x).M(y).P(&f).M(cp).M(unsigned(op)).v))
+        fb->DrawGlyph(x, y, f, cp, op);
+}
+
 void Ui::Fit(int x, int y, int w, int h, const Font* const* ladder, int ladderCount,
              const char* s, int maxFontSize)
 {
+    if (!Note(4, x, y, w, h,
+              OpHash().M(x).M(y).M(w).M(h).P(ladder).M(ladderCount).M(maxFontSize).S(s).v))
+        return;
+
     const Font* font = ladder[ladderCount - 1];
     Ink ink = MeasureInk(*font, s);
     for (int i = 0; i < ladderCount; i++)
@@ -80,7 +260,12 @@ void Ui::Wrapped(int cx, int cy, int maxW, const Font& font, const char* text)
     }
 
     int lineH = font.height + font.spacing;
-    int y = cy - n * lineH / 2;
+    int top = cy - n * lineH / 2;
+    if (!Note(5, cx - maxW / 2 - 2, top, maxW + 4, n * lineH,
+              OpHash().M(cx).M(cy).M(maxW).P(&font).S(text).v))
+        return;
+
+    int y = top;
     for (int i = 0; i < n; i++)
     {
         Span s(lines[i], lens[i]);
@@ -93,14 +278,21 @@ void Ui::Wrapped(int cx, int cy, int maxW, const Font& font, const char* text)
 int Ui::LabelBar(int x, int y, int w, const Font& f, const char* s)
 {
     int h = f.height;
-    fb->FillRect(x, y, w, h, DrawOp::Set);
-    int tw = MonoBuffer::MeasureText(f, s);
-    fb->DrawText(x + ((w - tw) >> 1), y, f, s, DrawOp::Clear);
+    if (Note(6, x, y, w, h, OpHash().M(x).M(y).M(w).P(&f).S(s).v))
+    {
+        fb->FillRect(x, y, w, h, DrawOp::Set);
+        int tw = MonoBuffer::MeasureText(f, s);
+        fb->DrawText(x + ((w - tw) >> 1), y, f, s, DrawOp::Clear);
+    }
     return h;
 }
 
+// ---- panel chrome
+
 void Ui::Panel(int x, int y, int w, int h, int r)
 {
+    if (!Note(7, x, y, w, h, OpHash().M(x).M(y).M(w).M(h).M(r).v))
+        return;
     fb->FillRoundRect(x, y, w, h, r, DrawOp::Set);
     fb->FillRoundRect(x + 2, y + 2, w - 4, h - 4, r - 2, DrawOp::Clear);
 }
@@ -108,18 +300,44 @@ void Ui::Panel(int x, int y, int w, int h, int r)
 void Ui::Toast(int x, int y, int w, int h, int r, const Font& titleFont,
                const char* title, int contentH, int& cx, int& cy)
 {
-    Panel(x, y, w, h, r);
+    int barH = titleFont.height + 2;
+    cx = x + w / 2;
+    cy = y + 2 + barH + (h - 4 - barH - contentH) / 2;
+
+    if (!Note(8, x, y, w, h,
+              OpHash().M(x).M(y).M(w).M(h).M(r).P(&titleFont).M(contentH).S(title).v))
+        return;
+
+    fb->FillRoundRect(x, y, w, h, r, DrawOp::Set);
+    fb->FillRoundRect(x + 2, y + 2, w - 4, h - 4, r - 2, DrawOp::Clear);
 
     // title bar with the interior's rounded top: a rounded fill extending
     // r-2 below the bar, whose overhang is then cleared - the overhang
     // rows lie in the straight-wall zone (barH >= r-2), so the border
     // band's corner arcs are never touched
-    int barH = titleFont.height + 2;
     fb->FillRoundRect(x + 2, y + 2, w - 4, barH + (r - 2), r - 2, DrawOp::Set);
     fb->FillRect(x + 2, y + 2 + barH, w - 4, r - 2, DrawOp::Clear);
 
     int tw = MonoBuffer::MeasureText(titleFont, title);
     fb->DrawText(x + (w - tw) / 2, y + 3, titleFont, title, DrawOp::Clear);
-    cx = x + w / 2;
-    cy = y + 2 + barH + (h - 4 - barH - contentH) / 2;
+}
+
+// ---- shapes
+
+void Ui::Fill(int x, int y, int w, int h, DrawOp op)
+{
+    if (Note(9, x, y, w, h, OpHash().M(x).M(y).M(w).M(h).M(unsigned(op)).v))
+        fb->FillRect(x, y, w, h, op);
+}
+
+void Ui::FillRound(int x, int y, int w, int h, int r, DrawOp op)
+{
+    if (Note(10, x, y, w, h, OpHash().M(x).M(y).M(w).M(h).M(r).M(unsigned(op)).v))
+        fb->FillRoundRect(x, y, w, h, r, op);
+}
+
+void Ui::Round(int x, int y, int w, int h, int r, DrawOp op)
+{
+    if (Note(11, x, y, w, h, OpHash().M(x).M(y).M(w).M(h).M(r).M(unsigned(op)).v))
+        fb->DrawRoundRect(x, y, w, h, r, op);
 }
