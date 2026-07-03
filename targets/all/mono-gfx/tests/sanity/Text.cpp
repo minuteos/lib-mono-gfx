@@ -30,6 +30,21 @@ TEST_CASE("02 MeasureText newline picks longest line")
     AssertEqual(MonoBuffer::MeasureText(Font5x7, "\n\n\n"),    0);
 }
 
+TEST_CASE("02b MeasureText reports block height for multi-line text")
+{
+    // Font5x7: height 7, spacing 1 -> line pitch 8
+    int h = -1;
+    AssertEqual(MonoBuffer::MeasureText(Font5x7, "Hi", &h), 12);
+    AssertEqual(h, 7);                              // single line
+    MonoBuffer::MeasureText(Font5x7, "A\nB", &h);
+    AssertEqual(h, 15);                             // 2*7 + 1
+    MonoBuffer::MeasureText(Font5x7, "\n\n\n", &h);
+    AssertEqual(h, 31);                             // 4 lines: 4*7 + 3
+    // an empty string is still one line tall, never zero-height
+    MonoBuffer::MeasureText(Font5x7, "", &h);
+    AssertEqual(h, 7);
+}
+
 TEST_CASE("03 DrawText returns final pen position")
 {
     uint8_t mem[10 * 8] = {};

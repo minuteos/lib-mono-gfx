@@ -192,12 +192,10 @@ Ui::Ink Ui::MeasureInk(const Font& f, const char* s)
 
 void Ui::Text(int x, int y, const Font& f, const char* s, DrawOp op)
 {
-    int w = MonoBuffer::MeasureText(f, s);
-    int lines = 1;
-    for (const char* q = s; *q; q++)
-        if (*q == '\n') lines++;
+    int h;
+    int w = MonoBuffer::MeasureText(f, s, &h);
     // pad the box horizontally for glyph side bearings
-    if (Note(2, x - 2, y, w + 4, (lines - 1) * (f.height + f.spacing) + f.height,
+    if (Note(2, x - 2, y, w + 4, h,
              OpHash().M(x).M(y).P(&f).M(unsigned(op)).S(s).v))
         fb->DrawText(x, y, f, s, op);
 }

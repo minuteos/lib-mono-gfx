@@ -214,11 +214,15 @@ public:
     ALWAYS_INLINE int DrawText(int x, int y, const Font& font, const char* sz, DrawOp op = DrawOp::Set)
     { return DrawText(x, y, font, Span::FromSZ(sz), op); }
 
-    //! Returns the width in pixels that @ref DrawText would consume
-    static int MeasureText(const Font& font, Span text);
+    //! Returns the width in pixels that @ref DrawText would consume (the
+    //! widest line for multi-line text). When @p height is non-null it
+    //! receives the block height, accounting for embedded newlines - so a
+    //! caller measuring a multi-line string is never handed a single-line
+    //! box by mistake
+    static int MeasureText(const Font& font, Span text, int* height = nullptr);
     //! Convenience wrapper for null-terminated strings
-    ALWAYS_INLINE static int MeasureText(const Font& font, const char* sz)
-    { return MeasureText(font, Span::FromSZ(sz)); }
+    ALWAYS_INLINE static int MeasureText(const Font& font, const char* sz, int* height = nullptr)
+    { return MeasureText(font, Span::FromSZ(sz), height); }
 
 private:
     //! Clips a horizontal run [x, x+width) to the buffer width and the row [0,h)

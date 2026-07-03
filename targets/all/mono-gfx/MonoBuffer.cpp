@@ -678,9 +678,9 @@ int MonoBuffer::DrawText(int x, int y, const Font& font, Span text, DrawOp op)
     return pen;
 }
 
-int MonoBuffer::MeasureText(const Font& font, Span text)
+int MonoBuffer::MeasureText(const Font& font, Span text, int* height)
 {
-    int pen = 0, longest = 0;
+    int pen = 0, longest = 0, lines = 1;
     int spacing = font.spacing;
     auto* p = text.Pointer();
     auto* end = text.end();
@@ -691,9 +691,11 @@ int MonoBuffer::MeasureText(const Font& font, Span text)
         {
             if (pen > longest) longest = pen;
             pen = 0;
+            lines++;
             continue;
         }
         pen += font.GetGlyph(c).width + spacing;
     }
+    if (height) *height = lines * font.height + (lines - 1) * spacing;
     return pen > longest ? pen : longest;
 }
