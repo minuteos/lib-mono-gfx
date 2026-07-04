@@ -79,16 +79,47 @@ public:
     enum class Mode : uint8_t { Direct, Collect, Draw };
 
     //! Direct-drawing context (no diffing)
-    explicit Ui(MonoBuffer& fb) : fb(&fb) {}
+    explicit Ui(MonoBuffer& fb) : fb(&fb) { InitArea(); }
     //! Collect-pass context: ops are hashed into @p diff, nothing is drawn
-    Ui(MonoBuffer& fb, UiDiff& diff) : fb(&fb), diff(&diff), mode(Mode::Collect) {}
+    Ui(MonoBuffer& fb, UiDiff& diff) : fb(&fb), diff(&diff), mode(Mode::Collect) { InitArea(); }
     //! Draw-pass context: only ops intersecting @p dirty are painted
-    Ui(MonoBuffer& fb, const UiDirty& dirty) : fb(&fb), dirty(&dirty), mode(Mode::Draw) {}
+    Ui(MonoBuffer& fb, const UiDirty& dirty) : fb(&fb), dirty(&dirty), mode(Mode::Draw) { InitArea(); }
 
-    //! Logical screen dimensions - screens should lay out against these
-    //! rather than compile-time constants so rotation just works
-    int Width() const { return fb->Width(); }
-    int Height() const { return fb->Height(); }
+    //! Rectangle in the current area's local coordinates
+    struct Rect { int x, y, w, h; };
+
+    // ---- layout areas
+    //! Dimensions of the current layout area (the whole buffer at the top
+    //! level) - lay out against these, not compile-time constants
+    int Width() const { return aw; }
+    int Height() const { return ah; }
+
+    //! Pushes a child area (coordinates relative to the current one). All
+    //! subsequent ops address its local space and are clipped to it, until
+    //! the matching PopArea; children need no absolute coordinates
+    void PushArea(int x, int y, int w, int h);
+    void PushArea(const Rect& r) { PushArea(r.x, r.y, r.w, r.h); }
+    void PopArea();
+
+    //! RAII area: `auto a = ui.Area(...)` pops when it leaves scope
+    class Scope
+    {
+        Ui* u;
+    public:
+        explicit Scope(Ui* u) : u(u) {}
+        Scope(Scope&& o) : u(o.u) { o.u = nullptr; }
+        Scope(const Scope&) = delete;
+        ~Scope() { if (u) u->PopArea(); }
+    };
+    [[nodiscard]] Scope Area(int x, int y, int w, int h) { PushArea(x, y, w, h); return Scope(this); }
+    [[nodiscard]] Scope Area(const Rect& r) { PushArea(r); return Scope(this); }
+
+    //! Alignment within an area (H in the low bits, V in the next two)
+    enum class Align : uint8_t {
+        Left = 0, HCenter = 1, Right = 2,
+        Top = 0, VCenter = 4, Bottom = 8,
+        Center = HCenter | VCenter,
+    };
 
     //! Tight ink box of an ASCII string: x/y are the ink offset from the
     //! pen origin, w/h its extent
@@ -98,6 +129,9 @@ public:
     // ---- text
     void Text(int x, int y, const Font& f, const char* s, DrawOp op = DrawOp::Set);
     void Glyph(int x, int y, const Font& f, unsigned cp, DrawOp op = DrawOp::Set);
+
+    //! Draws @p s within the current area, aligned - no coordinates needed
+    void Label(const Font& f, const char* s, Align a = Align::Left, DrawOp op = DrawOp::Set);
 
     //! Draws @p s centred in the box, auto-picking the first ladder font
     //! whose ink fits with a 2px margin per side (falls back to the last),
@@ -118,23 +152,25 @@ public:
     void Panel(int x, int y, int w, int h, int r);
 
     //! Panel with a title bar whose rounded top matches the interior;
-    //! (cx, cy) receive the centre for content of height @p contentH
-    void Toast(int x, int y, int w, int h, int r, const Font& titleFont,
-               const char* title, int contentH, int& cx, int& cy);
+    //! @returns the interior content area below the bar (in the current
+    //! area's local coordinates), ready to PushArea into
+    Rect Toast(int x, int y, int w, int h, int r, const Font& titleFont,
+               const char* title);
 
     // ---- shapes
     void Fill(int x, int y, int w, int h, DrawOp op = DrawOp::Set);
     void FillRound(int x, int y, int w, int h, int r, DrawOp op = DrawOp::Set);
     void Round(int x, int y, int w, int h, int r, DrawOp op = DrawOp::Set);
 
-    //! Custom painter escape hatch. @p contentHash must identify the
-    //! painted content (the painter's inputs); 0 means unknown, treating
-    //! the region as changed every frame
+    //! Custom painter escape hatch; the painter receives the buffer and the
+    //! op's absolute rect. @p contentHash must identify the painted content
+    //! (the painter's inputs); 0 means unknown, repainting every frame
     template<typename F> void Custom(int x, int y, int w, int h,
                                      uint32_t contentHash, F&& paint)
     {
+        x += aox; y += aoy;
         if (Note(1, x, y, w, h, contentHash, contentHash == 0))
-            paint(*fb);
+            paint(*fb, x, y, w, h);
     }
 
     //! Direct buffer access for code not yet migrated to the op surface;
@@ -147,7 +183,24 @@ private:
     const UiDirty* dirty = nullptr;
     Mode mode = Mode::Direct;
 
+    // current layout area: local (0,0) maps to absolute (aox, aoy), with
+    // logical size aw x ah; a clip mirror tracks the buffer clip so nested
+    // areas intersect rather than replace
+    int aox = 0, aoy = 0, aw = 0, ah = 0;
+    int16_t clx0 = 0, cly0 = 0, clx1 = 0, cly1 = 0;
+    struct SavedArea { int ox, oy, w, h; int16_t x0, y0, x1, y1; };
+    static constexpr int MaxAreas = 8;
+    SavedArea areaStack[MaxAreas];
+    int areaDepth = 0;
+    void InitArea();
+
     //! Records/tests an op; @returns true if it should be painted
     bool Note(uint32_t tag, int x, int y, int w, int h, uint32_t hash,
               bool volatileOp = false);
+
+    //! Text with pre-measured extent (w/h), so Label doesn't re-measure
+    void TextAt(int x, int y, int w, int h, const Font& f, const char* s, DrawOp op);
 };
+
+constexpr Ui::Align operator|(Ui::Align a, Ui::Align b)
+{ return Ui::Align(uint8_t(a) | uint8_t(b)); }

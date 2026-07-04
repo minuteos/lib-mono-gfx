@@ -120,6 +120,12 @@ public:
     //! @c true if the current clip is narrower than the buffer
     ALWAYS_INLINE bool HasClip() const { return cx0 || cy0 || cx1 != w || cy1 != h; }
 
+    //! Current clip rectangle edges (for callers nesting their own clips)
+    ALWAYS_INLINE int ClipLeft() const { return cx0; }
+    ALWAYS_INLINE int ClipTop() const { return cy0; }
+    ALWAYS_INLINE int ClipRight() const { return cx1; }
+    ALWAYS_INLINE int ClipBottom() const { return cy1; }
+
     //! Fills the clip region (the entire buffer when unclipped) with background
     ALWAYS_INLINE void Clear()
     {

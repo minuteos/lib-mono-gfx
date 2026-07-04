@@ -147,6 +147,49 @@ struct OpHash
 
 }
 
+// ---- layout areas
+
+void Ui::InitArea()
+{
+    aox = aoy = 0;
+    aw = fb->Width();
+    ah = fb->Height();
+    clx0 = fb->ClipLeft();  cly0 = fb->ClipTop();
+    clx1 = fb->ClipRight(); cly1 = fb->ClipBottom();
+}
+
+void Ui::PushArea(int x, int y, int w, int h)
+{
+    ASSERT(areaDepth < MaxAreas);
+    areaStack[areaDepth] = { aox, aoy, aw, ah, clx0, cly0, clx1, cly1 };
+    areaDepth++;
+
+    aox += x; aoy += y; aw = w; ah = h;
+
+    // intersect the area with the clip already in effect (never widen it)
+    int nx0 = aox > clx0 ? aox : clx0;
+    int ny0 = aoy > cly0 ? aoy : cly0;
+    int nx1 = aox + w < clx1 ? aox + w : clx1;
+    int ny1 = aoy + h < cly1 ? aoy + h : cly1;
+    if (nx1 < nx0) nx1 = nx0;
+    if (ny1 < ny0) ny1 = ny0;
+    clx0 = nx0; cly0 = ny0; clx1 = nx1; cly1 = ny1;
+    fb->SetClip(clx0, cly0, clx1 - clx0, cly1 - cly0);
+}
+
+void Ui::PopArea()
+{
+    if (areaDepth <= 0) return;
+    areaDepth--;
+    if (areaDepth < MaxAreas)
+    {
+        const SavedArea& s = areaStack[areaDepth];
+        aox = s.ox; aoy = s.oy; aw = s.w; ah = s.h;
+        clx0 = s.x0; cly0 = s.y0; clx1 = s.x1; cly1 = s.y1;
+        fb->SetClip(clx0, cly0, clx1 - clx0, cly1 - cly0);
+    }
+}
+
 bool Ui::Note(uint32_t tag, int x, int y, int w, int h, uint32_t hash, bool volatileOp)
 {
     switch (mode)
@@ -190,40 +233,60 @@ Ui::Ink Ui::MeasureInk(const Font& f, const char* s)
     return { x0, y0, x1 - x0, y1 - y0 };
 }
 
-void Ui::Text(int x, int y, const Font& f, const char* s, DrawOp op)
+void Ui::TextAt(int x, int y, int w, int h, const Font& f, const char* s, DrawOp op)
 {
-    int h;
-    int w = MonoBuffer::MeasureText(f, s, &h);
+    x += aox; y += aoy;
     // pad the box horizontally for glyph side bearings
     if (Note(2, x - 2, y, w + 4, h,
              OpHash().M(x).M(y).P(&f).M(unsigned(op)).S(s).v))
         fb->DrawText(x, y, f, s, op);
 }
 
+void Ui::Text(int x, int y, const Font& f, const char* s, DrawOp op)
+{
+    int h, w = MonoBuffer::MeasureText(f, s, &h);
+    TextAt(x, y, w, h, f, s, op);
+}
+
 void Ui::Glyph(int x, int y, const Font& f, unsigned cp, DrawOp op)
 {
+    x += aox; y += aoy;
     ::Glyph g = f.GetGlyph(cp);
     if (Note(3, x - 2, y, g.width + 4, f.height,
              OpHash().M(x).M(y).P(&f).M(cp).M(unsigned(op)).v))
         fb->DrawGlyph(x, y, f, cp, op);
 }
 
+void Ui::Label(const Font& f, const char* s, Align a, DrawOp op)
+{
+    int th, tw = MonoBuffer::MeasureText(f, s, &th);
+    int hp = unsigned(a) & 3, vp = (unsigned(a) >> 2) & 3;
+    int x = hp == 1 ? (aw - tw) / 2 : hp == 2 ? aw - tw : 0;
+    int y = vp == 1 ? (ah - th) / 2 : vp == 2 ? ah - th : 0;
+    TextAt(x, y, tw, th, f, s, op);     // reuse the measurement
+}
+
 void Ui::Fit(int x, int y, int w, int h, const Font* const* ladder, int ladderCount,
              const char* s, int maxFontSize)
 {
+    x += aox; y += aoy;
     if (!Note(4, x, y, w, h,
               OpHash().M(x).M(y).M(w).M(h).P(ladder).M(ladderCount).M(maxFontSize).S(s).v))
         return;
 
-    const Font* font = ladder[ladderCount - 1];
-    Ink ink = MeasureInk(*font, s);
+    // walk the ladder largest-first, keeping the last measured font as the
+    // fallback; no separate pre-measure to throw away when one fits
+    const Font* font = nullptr;
+    Ink ink {};
     for (int i = 0; i < ladderCount; i++)
     {
         const Font* f = ladder[i];
         if (maxFontSize > 0 && f->height > maxFontSize) continue;
-        Ink k = MeasureInk(*f, s);
-        if (k.w <= w - 4 && k.h <= h - 4) { font = f; ink = k; break; }
+        font = f; ink = MeasureInk(*f, s);
+        if (ink.w <= w - 4 && ink.h <= h - 4) break;
     }
+    if (!font) { font = ladder[ladderCount - 1]; ink = MeasureInk(*font, s); }
+
     int tx = x + ((w - ink.w) >> 1) - ink.x;
     int ty = y + ((h - ink.h) >> 1) - ink.y;
     fb->DrawText(tx, ty, *font, s);
@@ -232,6 +295,7 @@ void Ui::Fit(int x, int y, int w, int h, const Font* const* ladder, int ladderCo
 void Ui::Wrapped(int cx, int cy, int maxW, const Font& font, const char* text)
 {
     if (!text || !*text) return;
+    cx += aox; cy += aoy;
 
     const char* lines[8];
     int lens[8], n = 0;
@@ -275,6 +339,7 @@ void Ui::Wrapped(int cx, int cy, int maxW, const Font& font, const char* text)
 
 int Ui::LabelBar(int x, int y, int w, const Font& f, const char* s)
 {
+    x += aox; y += aoy;
     int h = f.height;
     if (Note(6, x, y, w, h, OpHash().M(x).M(y).M(w).P(&f).S(s).v))
     {
@@ -289,53 +354,59 @@ int Ui::LabelBar(int x, int y, int w, const Font& f, const char* s)
 
 void Ui::Panel(int x, int y, int w, int h, int r)
 {
+    x += aox; y += aoy;
     if (!Note(7, x, y, w, h, OpHash().M(x).M(y).M(w).M(h).M(r).v))
         return;
     fb->FillRoundRect(x, y, w, h, r, DrawOp::Set);
     fb->FillRoundRect(x + 2, y + 2, w - 4, h - 4, r - 2, DrawOp::Clear);
 }
 
-void Ui::Toast(int x, int y, int w, int h, int r, const Font& titleFont,
-               const char* title, int contentH, int& cx, int& cy)
+Ui::Rect Ui::Toast(int x, int y, int w, int h, int r, const Font& titleFont,
+                   const char* title)
 {
     int barH = titleFont.height + 2;
-    cx = x + w / 2;
-    cy = y + 2 + barH + (h - 4 - barH - contentH) / 2;
+    // interior below the title bar, in local coordinates (for the caller)
+    Rect content = { x + 2, y + 2 + barH, w - 4, h - 4 - barH };
 
-    if (!Note(8, x, y, w, h,
-              OpHash().M(x).M(y).M(w).M(h).M(r).P(&titleFont).M(contentH).S(title).v))
-        return;
+    int ax = x + aox, ay = y + aoy;
+    if (!Note(8, ax, ay, w, h,
+              OpHash().M(ax).M(ay).M(w).M(h).M(r).P(&titleFont).S(title).v))
+        return content;
 
-    fb->FillRoundRect(x, y, w, h, r, DrawOp::Set);
-    fb->FillRoundRect(x + 2, y + 2, w - 4, h - 4, r - 2, DrawOp::Clear);
+    fb->FillRoundRect(ax, ay, w, h, r, DrawOp::Set);
+    fb->FillRoundRect(ax + 2, ay + 2, w - 4, h - 4, r - 2, DrawOp::Clear);
 
     // title bar with the interior's rounded top: a rounded fill extending
     // r-2 below the bar, whose overhang is then cleared - the overhang
     // rows lie in the straight-wall zone (barH >= r-2), so the border
     // band's corner arcs are never touched
-    fb->FillRoundRect(x + 2, y + 2, w - 4, barH + (r - 2), r - 2, DrawOp::Set);
-    fb->FillRect(x + 2, y + 2 + barH, w - 4, r - 2, DrawOp::Clear);
+    fb->FillRoundRect(ax + 2, ay + 2, w - 4, barH + (r - 2), r - 2, DrawOp::Set);
+    fb->FillRect(ax + 2, ay + 2 + barH, w - 4, r - 2, DrawOp::Clear);
 
     int tw = MonoBuffer::MeasureText(titleFont, title);
-    fb->DrawText(x + (w - tw) / 2, y + 3, titleFont, title, DrawOp::Clear);
+    fb->DrawText(ax + (w - tw) / 2, ay + 3, titleFont, title, DrawOp::Clear);
+    return content;
 }
 
 // ---- shapes
 
 void Ui::Fill(int x, int y, int w, int h, DrawOp op)
 {
+    x += aox; y += aoy;
     if (Note(9, x, y, w, h, OpHash().M(x).M(y).M(w).M(h).M(unsigned(op)).v))
         fb->FillRect(x, y, w, h, op);
 }
 
 void Ui::FillRound(int x, int y, int w, int h, int r, DrawOp op)
 {
+    x += aox; y += aoy;
     if (Note(10, x, y, w, h, OpHash().M(x).M(y).M(w).M(h).M(r).M(unsigned(op)).v))
         fb->FillRoundRect(x, y, w, h, r, op);
 }
 
 void Ui::Round(int x, int y, int w, int h, int r, DrawOp op)
 {
+    x += aox; y += aoy;
     if (Note(11, x, y, w, h, OpHash().M(x).M(y).M(w).M(h).M(r).M(unsigned(op)).v))
         fb->DrawRoundRect(x, y, w, h, r, op);
 }
