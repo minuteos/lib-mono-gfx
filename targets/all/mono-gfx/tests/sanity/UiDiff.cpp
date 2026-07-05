@@ -175,11 +175,11 @@ TEST_CASE("06 Volatile ops repaint every frame, hashed ops do not")
 
     int paints = 0;
     auto render = [&](Ui& ui) {
-        ui.Custom(4, 4, 16, 16, 0, [&](MonoBuffer& fb) {
+        ui.Custom(4, 4, 16, 16, 0, [&](MonoBuffer& fb, int, int, int, int) {
             paints++;
             fb.FillCircle(12, 12, 6);
         });
-        ui.Custom(30, 4, 16, 16, 123, [&](MonoBuffer& fb) {
+        ui.Custom(30, 4, 16, 16, 123, [&](MonoBuffer& fb, int, int, int, int) {
             fb.FillRect(32, 6, 8, 8);
         });
     };
@@ -212,6 +212,28 @@ TEST_CASE("07 Off-screen op rects are clamped out of the dirty region")
         Assert(d.rects[i].x1 <= W && d.rects[i].y1 <= H);
     }
     AssertMatchesDirect(f.fb, render);
+}
+
+TEST_CASE("07b A moving volatile op clears its previous position")
+{
+    Frame f;
+    UiSlot slots[8];
+    UiDiff diff;
+    diff.SetStorage(slots, 8);
+
+    int x = 4;
+    auto render = [&](Ui& ui) {
+        ui.Custom(x, 4, 8, 8, 0, [](MonoBuffer& fb, int px, int py, int pw, int ph) {
+            fb.FillRect(px, py, pw, ph);
+        });
+    };
+
+    Incremental(diff, f.fb, render);            // frame 1: full
+    x = 40;                                      // move the volatile op
+    auto& d = Incremental(diff, f.fb, render);
+    Assert(d.Intersects(4, 4, 8, 8));           // old position re-cleared
+    Assert(d.Intersects(40, 4, 8, 8));          // new position painted
+    AssertMatchesDirect(f.fb, render);          // no stale trail left behind
 }
 
 TEST_CASE("08 UiDirty merges overlapping rects and bounds the count")

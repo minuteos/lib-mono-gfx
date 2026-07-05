@@ -29,8 +29,10 @@ bool MonoBuffer::ClipRect(int& x, int& y, int& width, int& height) const
 {
     if (x < cx0) { width += x - cx0; x = cx0; }
     if (y < cy0) { height += y - cy0; y = cy0; }
-    if (x + width > cx1) width = cx1 - x;
-    if (y + height > cy1) height = cy1 - y;
+    // compare against the remaining span, not x+width, so a huge width
+    // cannot overflow and skip the clamp into an unbounded run
+    if (width > cx1 - x) width = cx1 - x;
+    if (height > cy1 - y) height = cy1 - y;
     return width > 0 && height > 0;
 }
 
@@ -457,10 +459,12 @@ void MonoBuffer::BlitRotated(int destX, int destY, const MonoBuffer& src,
         if (dy > maxY) maxY = dy;
     }
 
-    if (minX < 0) minX = 0;
-    if (minY < 0) minY = 0;
-    if (maxX >= w) maxX = w - 1;
-    if (maxY >= h) maxY = h - 1;
+    // confine to the clip (defaults to the whole buffer) - like every other
+    // primitive; the raw p[] pokes below would otherwise ignore it
+    if (minX < cx0) minX = cx0;
+    if (minY < cy0) minY = cy0;
+    if (maxX >= cx1) maxX = cx1 - 1;
+    if (maxY >= cy1) maxY = cy1 - 1;
 
     // inverse map every destination pixel back into source space (nearest)
     for (int dy = minY; dy <= maxY; dy++)
@@ -658,8 +662,8 @@ int MonoBuffer::DrawGlyph(int x, int y, const Font& font, unsigned cp, DrawOp op
 
 int MonoBuffer::DrawText(int x, int y, const Font& font, Span text, DrawOp op)
 {
-    if (op == DrawOp::Keep) return x + MeasureText(font, text);
-
+    // Keep advances the pen without drawing (DrawGlyph honours it), so the
+    // return matches the drawing paths even for multi-line text
     int pen = x;
     int lineH = font.height + font.spacing;
     auto* sp = text.Pointer();

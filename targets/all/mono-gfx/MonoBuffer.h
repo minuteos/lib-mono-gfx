@@ -48,7 +48,9 @@ public:
 
     //! Constructs a buffer over a contiguous tightly-packed framebuffer
     /*!
-     * The row stride is computed as @c (width+7)/8 bytes.
+     * The row stride is computed as @c (width+7)/8 bytes. Dimensions are
+     * held as @c int16_t, so width and height must be in [0, 32767];
+     * larger values are silently truncated.
      */
     constexpr MonoBuffer(void* data, int width, int height)
         : p((uint8_t*)data), w(width), h(height), s((width + 7) >> 3),
@@ -120,7 +122,9 @@ public:
     //! @c true if the current clip is narrower than the buffer
     ALWAYS_INLINE bool HasClip() const { return cx0 || cy0 || cx1 != w || cy1 != h; }
 
-    //! Current clip rectangle edges (for callers nesting their own clips)
+    //! Current clip rectangle edges. There is no clip stack - a caller that
+    //! wants to nest must read these, intersect, SetClip, and restore them
+    //! itself (ClearClip resets to the whole buffer, not the previous clip)
     ALWAYS_INLINE int ClipLeft() const { return cx0; }
     ALWAYS_INLINE int ClipTop() const { return cy0; }
     ALWAYS_INLINE int ClipRight() const { return cx1; }
@@ -192,17 +196,17 @@ public:
         int pivotX, int pivotY, int angleDeg, DrawOp op = DrawOp::Set);
 
     //! Copies a source buffer onto this one at (@p x, @p y) using the specified blit op
+    /*! Source and destination must not overlap the same backing memory. */
     void Blit(int x, int y, const MonoBuffer& src, BlitOp op = BlitOp::Copy);
     //! Copies a source rectangle onto this one at (@p x, @p y) using the specified blit op
     void Blit(int x, int y, const MonoBuffer& src, int sx, int sy, int width, int height, BlitOp op = BlitOp::Copy);
 
     //! Renders a single glyph by code point at (@p x, @p y)
     /*!
-     * Unlike @ref DrawText (which walks a byte string and so only reaches
-     * code points 0-255) this takes a full code point, so symbol/icon
-     * fonts beyond U+00FF are drawable directly. Returns the X coordinate
-     * at which the next glyph would be drawn (@p x + width + spacing),
-     * useful for chaining.
+     * Takes a full code point, so symbol/icon fonts beyond U+00FF are
+     * drawable directly without a UTF-8 string (@ref DrawText also reaches
+     * them, by decoding). Returns the X coordinate at which the next glyph
+     * would be drawn (@p x + width + spacing), useful for chaining.
      */
     int DrawGlyph(int x, int y, const Font& font, unsigned codepoint, DrawOp op = DrawOp::Set);
 
@@ -236,7 +240,7 @@ private:
     {
         if (y < cy0 || y >= cy1) return false;
         if (x < cx0) { width += x - cx0; x = cx0; }
-        if (x + width > cx1) width = cx1 - x;
+        if (width > cx1 - x) width = cx1 - x;   // span form avoids x+width overflow
         return width > 0;
     }
 
@@ -245,7 +249,7 @@ private:
     {
         if (x < cx0 || x >= cx1) return false;
         if (y < cy0) { height += y - cy0; y = cy0; }
-        if (y + height > cy1) height = cy1 - y;
+        if (height > cy1 - y) height = cy1 - y;   // span form avoids y+height overflow
         return height > 0;
     }
 

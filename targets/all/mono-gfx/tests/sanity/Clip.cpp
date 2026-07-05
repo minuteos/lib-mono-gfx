@@ -104,4 +104,36 @@ TEST_CASE("05 Blit clips its destination")
             AssertEqual(b.GetPixel(x, y), x >= 10 && x < 14 && y >= 2 && y < 6);
 }
 
+TEST_CASE("06 BlitRotated honours the clip")
+{
+    uint8_t src[8] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+    MonoBuffer sb(src, 8, 8);
+    uint8_t mem[4 * 16] = {};
+    MonoBuffer b(mem, 32, 16);
+    b.SetClip(10, 4, 6, 6);
+    b.BlitRotated(10, 4, sb, 0, 0, 0);          // 0deg == straight copy
+    bool any = false;
+    for (int y = 0; y < 16; y++)
+        for (int x = 0; x < 32; x++)
+            if (b.GetPixel(x, y))
+            {
+                any = true;
+                Assert(x >= 10 && x < 16 && y >= 4 && y < 10);
+            }
+    Assert(any);                                // it actually drew something
+}
+
+TEST_CASE("07 A huge extent cannot overflow the clip into an unbounded run")
+{
+    uint8_t mem[4 * 8] = {};
+    MonoBuffer b(mem, 32, 8);
+    // x + width overflows int; the clamp must still bound the run
+    b.FillRect(4, 0, 0x7FFFFFFF, 2);
+    for (int y = 0; y < 8; y++)
+        for (int x = 0; x < 32; x++)
+            AssertEqual(b.GetPixel(x, y), y < 2 && x >= 4);
+    AssertEqual(b.GetPixel(31, 0), true);       // filled up to the edge
+    AssertEqual(b.GetPixel(31, 2), false);      // but not past the height
+}
+
 }

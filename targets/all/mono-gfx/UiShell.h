@@ -31,7 +31,9 @@ class UiScreen
 {
 public:
     virtual void Render(Ui& ui) = 0;
-    //! @returns true if the key was consumed
+    //! Handles a key; @returns true if consumed. May mutate the shell
+    //! (SetBase/Push/Pop own layer). Popping a layer *below* this one while
+    //! returning false can misroute the key, so don't - pop self or consume.
     virtual bool OnKey(UiKey k) { return false; }
 };
 
@@ -48,7 +50,8 @@ public:
 
     UiScreen* Base() const { return base; }
 
-    //! Shows a transient layer; pushing an already shown layer just
+    //! Shows a transient layer (up to MaxLayers; a push past that is
+    //! dropped). Pushing an already shown layer just
     //! extends its timeout
     void Push(UiScreen& s, Timeout timeout)
     {

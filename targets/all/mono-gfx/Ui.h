@@ -45,7 +45,13 @@ struct UiSlot
     uint32_t hash;
 };
 
-//! Frame-to-frame op diff over a single slot array (compare-and-overwrite)
+//! Frame-to-frame op diff over a single slot array (compare-and-overwrite).
+//! Two assumptions bound its correctness: (1) each op's painted pixels stay
+//! within the bounding box it reports (text ink must not overhang the pen
+//! advance by more than the 2px pad), else stale pixels can linger on a
+//! changed frame; (2) an op's content hash is 32-bit, so a hash collision on
+//! an op whose bounding box is unchanged treats a real change as unchanged
+//! (astronomically rare, but not impossible).
 class UiDiff
 {
 public:
@@ -121,21 +127,27 @@ public:
         Center = HCenter | VCenter,
     };
 
-    //! Tight ink box of an ASCII string: x/y are the ink offset from the
-    //! pen origin, w/h its extent
+    //! Tight ink box of a UTF-8 string: x/y are the ink offset from the
+    //! pen origin, w/h its extent. Requires an RLE-format font (it scans
+    //! glyph spans); a raw-bitmap font yields an empty box, so Fit - which
+    //! relies on it - only auto-sizes correctly with RLE fonts.
     struct Ink { int x, y, w, h; };
     static Ink MeasureInk(const Font& f, const char* s);
 
     // ---- text
+    //! Draws @p s at (@p x, @p y) relative to the current area (not the
+    //! buffer); unlike MonoBuffer::DrawText it returns nothing - measure
+    //! with MeasureText/MeasureInk if you need the pen advance
     void Text(int x, int y, const Font& f, const char* s, DrawOp op = DrawOp::Set);
+    //! Draws one glyph at (@p x, @p y) relative to the current area
     void Glyph(int x, int y, const Font& f, unsigned cp, DrawOp op = DrawOp::Set);
 
     //! Draws @p s within the current area, aligned - no coordinates needed
     void Label(const Font& f, const char* s, Align a = Align::Left, DrawOp op = DrawOp::Set);
 
     //! Draws @p s centred in the box, auto-picking the first ladder font
-    //! whose ink fits with a 2px margin per side (falls back to the last),
-    //! then centring the ink box
+    //! whose ink fits with a 2px margin per side (falls back to the last);
+    //! @p ladder must hold at least one font (@p ladderCount > 0)
     void Fit(int x, int y, int w, int h, const Font* const* ladder, int ladderCount,
              const char* s, int maxFontSize = 0);
 
@@ -157,9 +169,12 @@ public:
     Rect Toast(int x, int y, int w, int h, int r, const Font& titleFont,
                const char* title);
 
-    // ---- shapes
+    // ---- shapes (coordinates relative to the current area)
+    //! Filled rectangle
     void Fill(int x, int y, int w, int h, DrawOp op = DrawOp::Set);
+    //! Filled rounded rectangle
     void FillRound(int x, int y, int w, int h, int r, DrawOp op = DrawOp::Set);
+    //! Rounded-rectangle outline (stroke only - the Fill* variants fill)
     void Round(int x, int y, int w, int h, int r, DrawOp op = DrawOp::Set);
 
     //! Custom painter escape hatch; the painter receives the buffer and the

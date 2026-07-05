@@ -10,6 +10,8 @@
 
 #include "Ui.h"
 
+#include <mono-gfx/Utf8.h>
+
 // ---- UiDirty
 
 void UiDirty::Add(int x, int y, int w, int h)
@@ -76,10 +78,13 @@ void UiDiff::Note(int x, int y, int w, int h, uint32_t hash, bool volatileOp)
         overflow = true;
         return;
     }
-    if (!volatileOp && count < prevCount)
+    if (count < prevCount)
     {
         const UiSlot& p = slots[count];
-        if (p.x == x && p.y == y && p.w == w && p.h == h && p.hash == hash)
+        // a volatile op always repaints, but if it moved, its previous
+        // rectangle still has to be cleared - so only the unchanged
+        // non-volatile case short-circuits; every other case dirties the old
+        if (!volatileOp && p.x == x && p.y == y && p.w == w && p.h == h && p.hash == hash)
         {
             count++;
             return;
@@ -160,8 +165,11 @@ void Ui::InitArea()
 
 void Ui::PushArea(int x, int y, int w, int h)
 {
+    // the ASSERT is compiled out in release, so keep the bounds check too -
+    // overflowing the fixed stack must never become an out-of-bounds write
     ASSERT(areaDepth < MaxAreas);
-    areaStack[areaDepth] = { aox, aoy, aw, ah, clx0, cly0, clx1, cly1 };
+    if (areaDepth < MaxAreas)
+        areaStack[areaDepth] = { aox, aoy, aw, ah, clx0, cly0, clx1, cly1 };
     areaDepth++;
 
     aox += x; aoy += y; aw = w; ah = h;
@@ -212,9 +220,11 @@ bool Ui::Note(uint32_t tag, int x, int y, int w, int h, uint32_t hash, bool vola
 Ui::Ink Ui::MeasureInk(const Font& f, const char* s)
 {
     int x0 = INT32_MAX, y0 = INT32_MAX, x1 = INT32_MIN, y1 = INT32_MIN, pen = 0;
-    for (; *s; s++)
+    const char* p = s;
+    const char* end = s + strlen(s);
+    while (p < end)
     {
-        unsigned cp = (unsigned char)*s;
+        unsigned cp = Utf8Next(p, end);     // decode like the rest of the text API
         ::Glyph g = f.GetGlyph(cp);
         // measure in the exact space DrawText paints: pen + left bearing
         // horizontally, baseline-relative vertically
@@ -269,6 +279,8 @@ void Ui::Label(const Font& f, const char* s, Align a, DrawOp op)
 void Ui::Fit(int x, int y, int w, int h, const Font* const* ladder, int ladderCount,
              const char* s, int maxFontSize)
 {
+    ASSERT(ladderCount > 0);
+    if (ladderCount <= 0) return;       // no fonts to choose from
     x += aox; y += aoy;
     if (!Note(4, x, y, w, h,
               OpHash().M(x).M(y).M(w).M(h).P(ladder).M(ladderCount).M(maxFontSize).S(s).v))

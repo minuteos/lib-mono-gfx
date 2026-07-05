@@ -45,6 +45,18 @@ TEST_CASE("02b MeasureText reports block height for multi-line text")
     AssertEqual(h, 7);
 }
 
+TEST_CASE("02c DrawText(Keep) returns the same pen as drawing, incl. multi-line")
+{
+    uint8_t mem[16 * 16] = {};
+    MonoBuffer b(mem, 128, 16);
+    // last line ("Hi", 12px) is narrower than the widest ("World", 30px);
+    // Keep must return the last-line pen, matching the drawn path
+    int drawn = b.DrawText(0, 0, Font5x7, "World\nHi");
+    int kept = b.DrawText(0, 0, Font5x7, "World\nHi", DrawOp::Keep);
+    AssertEqual(kept, drawn);
+    AssertEqual(kept, 12);
+}
+
 TEST_CASE("03 DrawText returns final pen position")
 {
     uint8_t mem[10 * 8] = {};
